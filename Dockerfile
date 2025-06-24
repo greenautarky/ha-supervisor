@@ -51,3 +51,19 @@ RUN \
 
 WORKDIR /
 COPY rootfs /
+LABEL io.hass.arch="armv7" \
+      io.hass.base.arch="armv7" \
+      io.hass.base.image="ghcr.io/home-assistant/armv7-base:3.21" \
+      io.hass.base.name="python" \
+      io.hass.base.version="2025.06.1" \
+      io.hass.type="supervisor" \
+      io.hass.version="2025.06.1" \
+      org.opencontainers.image.authors="The Home Assistant Authors" \
+      org.opencontainers.image.created="2025-06-24 09:20:45+0000" \
+      org.opencontainers.image.description="Container-based system for managing Home Assistant Core installation" \
+      org.opencontainers.image.documentation="https://www.home-assistant.io/docs/" \
+      org.opencontainers.image.licenses="Apache License 2.0" \
+      org.opencontainers.image.source="https://github.com/iHost-Open-Source-Project/ha-supervisor" \
+      org.opencontainers.image.title="Home Assistant Supervisor" \
+      org.opencontainers.image.url="https://www.home-assistant.io/" \
+      org.opencontainers.image.version="2025.06.1"
