@@ -10,6 +10,7 @@ from ..const import (
     ATTR_USER,
     ATTR_VERSION,
     FILE_HASSIO_ADDONS,
+    ATTR_AUDIO_OUTPUT
 )
 from ..coresys import CoreSys, CoreSysAttributes
 from ..store.addon import AddonStore
@@ -45,6 +46,7 @@ class AddonsData(FileConfiguration, CoreSysAttributes):
             ATTR_OPTIONS: {},
             ATTR_VERSION: addon.version,
             ATTR_IMAGE: addon.image,
+            ATTR_AUDIO_OUTPUT: "alsa_output.1.stereo-fallback" if addon.with_audio else None
         }
         await self.save_data()
 
