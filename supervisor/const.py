@@ -9,7 +9,7 @@ from typing import NotRequired, Self, TypedDict
 
 from aiohttp import __version__ as aiohttpversion
 
-SUPERVISOR_VERSION = "2025.07.2"
+SUPERVISOR_VERSION = "2025.07.2.1"
 SERVER_SOFTWARE = f"HomeAssistantSupervisor/{SUPERVISOR_VERSION} aiohttp/{aiohttpversion} Python/{systemversion[0]}.{systemversion[1]}"
 
 DOCKER_PREFIX: str = "hassio"
