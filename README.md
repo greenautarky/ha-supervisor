@@ -1,3 +1,5 @@
+> **GreenAutarky Build** — This is a customized version maintained by [GreenAutarky](https://github.com/greenautarky). Forked from [iHost-Open-Source-Project/ha-supervisor](https://github.com/iHost-Open-Source-Project/ha-supervisor), originally from [home-assistant/supervisor](https://github.com/home-assistant/supervisor). Licensed under Apache-2.0.
+
 # Home Assistant Supervisor
 
 ## First private cloud solution for home automation
