@@ -280,15 +280,38 @@ class Supervisor(CoreSysAttributes):
         throttle=JobThrottle.THROTTLE,
     )
     async def check_connectivity(self) -> None:
-        """Check the Internet connectivity from Supervisor's point of view."""
+        """Check the Internet connectivity from Supervisor's point of view.
+
+        GA patch: The upstream check only tries checkonline.home-assistant.io.
+        Some networks return 403 or block this specific URL while general
+        internet works fine. When the primary check fails, we try a fallback
+        URL (github.com) before declaring connectivity lost. This prevents
+        false "no internet" states that block addon repo updates (GitRepo.pull).
+        See: https://github.com/greenautarky/ha-supervisor/issues/1
+        """
         timeout = aiohttp.ClientTimeout(total=10)
+
+        # Primary check: upstream HA connectivity endpoint
         try:
             await self.sys_websession.head(
                 "https://checkonline.home-assistant.io/online.txt", timeout=timeout
             )
-        except (ClientError, TimeoutError) as err:
-            _LOGGER.debug("Supervisor Connectivity check failed: %s", err)
-            self.connectivity = False
-        else:
-            _LOGGER.debug("Supervisor Connectivity check succeeded")
-            self.connectivity = True
+        except (ClientError, TimeoutError) as primary_err:
+            # Fallback check: try github.com (needed for git repo pulls anyway)
+            _LOGGER.debug(
+                "Primary connectivity check failed (%s), trying fallback",
+                primary_err,
+            )
+            try:
+                await self.sys_websession.head(
+                    "https://github.com", timeout=timeout
+                )
+            except (ClientError, TimeoutError) as fallback_err:
+                _LOGGER.debug(
+                    "Fallback connectivity check also failed: %s", fallback_err
+                )
+                self.connectivity = False
+                return
+
+        _LOGGER.debug("Supervisor connectivity check succeeded")
+        self.connectivity = True
