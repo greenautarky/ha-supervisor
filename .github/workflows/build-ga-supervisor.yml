@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag (e.g. 2025.11.4)"
-        required: true
-        default: "2025.11.4.1"
+        description: "Version tag override (leave empty to auto-detect from const.py)"
+        required: false
+        default: ""
   push:
     branches:
       - ga/custom-version-url
@@ -44,11 +44,18 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG="${{ github.event.inputs.version }}"
           else
-            echo "tag=dev-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+            # Auto-detect from source code (single source of truth)
+            TAG=$(grep 'SUPERVISOR_VERSION = ' supervisor/const.py | head -1 | sed 's/.*"\(.*\)".*/\1/')
           fi
+          if [ -z "$TAG" ]; then
+            echo "ERROR: Could not determine version" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Supervisor version: ${TAG}"
 
       - name: Build and push
         uses: docker/build-push-action@v6
