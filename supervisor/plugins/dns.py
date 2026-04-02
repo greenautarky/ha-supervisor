@@ -436,9 +436,9 @@ class PluginDns(PluginBase):
             ),
             self.add_host(self.sys_docker.network.dns, ["dns"], write=False),
             self.add_host(self.sys_docker.network.observer, ["observer"], write=False),
-            self.add_host(IPv4Address("100.126.142.217"), ["influx.greenautarky.com"], write=False),
-            self.add_host(IPv4Address("100.126.142.217"), ["loki.greenautarky.com"], write=False),
-            self.add_host(IPv4Address("100.126.142.217"), ["ota.greenautarky.com"], write=False),
+            self.add_host(IPv4Address("100.126.129.116"), ["influx.greenautarky.com"], write=False),
+            self.add_host(IPv4Address("100.126.129.116"), ["loki.greenautarky.com"], write=False),
+            self.add_host(IPv4Address("100.126.129.116"), ["ota.greenautarky.com"], write=False),
         )
 
     async def write_hosts(self) -> None:
