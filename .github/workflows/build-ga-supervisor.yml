@@ -6,7 +6,7 @@ on:
       version:
         description: "Version tag (e.g. 2025.11.4)"
         required: true
-        default: "2025.11.4"
+        default: "2025.11.4.1"
   push:
     branches:
       - ga/custom-version-url
