@@ -419,8 +419,31 @@ class PluginDns(PluginBase):
                 f"Can't update coredns config: {err}", _LOGGER.error
             ) from err
 
+    @staticmethod
+    def _load_ga_services_ip() -> str:
+        """Load GA_SERVICES_IP from ga-services.conf (override or default).
+
+        The config file is a shell-sourceable key=value file on the host OS.
+        From inside the Supervisor container, the host filesystem is at /os/.
+        """
+        for conf_path in [
+            Path("/mnt/data/ga-services.conf"),       # runtime override (persistent)
+            Path("/os/etc/ga-services.conf"),          # rootfs default (via host mount)
+            Path("/etc/ga-services.conf"),             # fallback (if running on host)
+        ]:
+            if conf_path.is_file():
+                for line in conf_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("GA_SERVICES_IP="):
+                        return line.split("=", 1)[1].strip().strip("'\"")
+        return "100.126.129.116"  # hardcoded fallback if no config found
+
     async def _init_hosts(self) -> None:
         """Import hosts entry."""
+        # Load GA services IP from central config (single source of truth)
+        ga_ip = self._load_ga_services_ip()
+        _LOGGER.info("GA services IP: %s", ga_ip)
+
         # Generate Default
         await asyncio.gather(
             self.add_host(IPv4Address("127.0.0.1"), ["localhost"], write=False),
@@ -436,9 +459,9 @@ class PluginDns(PluginBase):
             ),
             self.add_host(self.sys_docker.network.dns, ["dns"], write=False),
             self.add_host(self.sys_docker.network.observer, ["observer"], write=False),
-            self.add_host(IPv4Address("100.126.129.116"), ["influx.greenautarky.com"], write=False),
-            self.add_host(IPv4Address("100.126.129.116"), ["loki.greenautarky.com"], write=False),
-            self.add_host(IPv4Address("100.126.129.116"), ["ota.greenautarky.com"], write=False),
+            self.add_host(IPv4Address(ga_ip), ["influx.greenautarky.com"], write=False),
+            self.add_host(IPv4Address(ga_ip), ["loki.greenautarky.com"], write=False),
+            self.add_host(IPv4Address(ga_ip), ["ota.greenautarky.com"], write=False),
         )
 
     async def write_hosts(self) -> None:
