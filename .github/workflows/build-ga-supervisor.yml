@@ -1,10 +1,26 @@
 name: Build greenautarky Supervisor image
 
+# Two operating modes — see ga-ihost-docs/RELEASE-ITERATION.md §"Mode 1":
+#
+#   1. STAGING (default — push trigger or workflow_dispatch with no version):
+#      Builds and publishes ONLY `:ci-{short_sha}`. Shared GHCR `:2025.11.4.X`
+#      release tags are NOT touched. Pull the staging tag onto the canary and
+#      retag locally for testing — keeps Mode-1's "fleet-safe iteration" promise.
+#
+#   2. RELEASE (workflow_dispatch with explicit `version` input):
+#      Publishes both `:ci-{short_sha}` AND the release tag `:<version>` AND
+#      `:latest`. Use only when promoting a build for inclusion in a v1.X
+#      release manifest (haos-version stable.json).
+#
+# The io.hass.version label always reflects the const.py SUPERVISOR_VERSION
+# (which a staging build TARGETS) so devices running a staging image can still
+# be identified by what release they're heading toward.
+
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag override (leave empty to auto-detect from const.py)"
+        description: "Release version tag (e.g. 2025.11.4.3). LEAVE EMPTY for staging-only build (recommended for iteration)."
         required: false
         default: ""
   push:
@@ -41,21 +57,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine version
-        id: version
+      - name: Determine version + tags
+        id: meta
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
-            TAG="${{ github.event.inputs.version }}"
-          else
-            # Auto-detect from source code (single source of truth)
-            TAG=$(grep 'SUPERVISOR_VERSION = ' supervisor/const.py | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          fi
-          if [ -z "$TAG" ]; then
-            echo "ERROR: Could not determine version" >&2
+          # io.hass.version always tracks const.py — the in-flight release the
+          # build TARGETS, even when published only as a staging tag.
+          VERSION_LABEL=$(grep 'SUPERVISOR_VERSION = ' supervisor/const.py | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ -z "$VERSION_LABEL" ]; then
+            echo "ERROR: Could not parse SUPERVISOR_VERSION from supervisor/const.py" >&2
             exit 1
           fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Supervisor version: ${TAG}"
+
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          STAGING_TAG="ci-${SHORT_SHA}"
+
+          REQUESTED_VERSION="${{ github.event.inputs.version }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "$REQUESTED_VERSION" ]; then
+            # RELEASE mode: write release tag + latest + staging tag
+            if [ "$REQUESTED_VERSION" != "$VERSION_LABEL" ]; then
+              echo "ERROR: requested version ($REQUESTED_VERSION) != const.py SUPERVISOR_VERSION ($VERSION_LABEL)" >&2
+              echo "  Bump SUPERVISOR_VERSION in supervisor/const.py first, push, then re-trigger." >&2
+              exit 1
+            fi
+            TAGS="${IMAGE}:${REQUESTED_VERSION},${IMAGE}:${STAGING_TAG},${IMAGE}:latest"
+            MODE="RELEASE"
+          else
+            # STAGING mode: only ci-tag, leave release tags untouched
+            TAGS="${IMAGE}:${STAGING_TAG}"
+            MODE="STAGING"
+          fi
+
+          echo "tags=${TAGS}"                  >> "$GITHUB_OUTPUT"
+          echo "version_label=${VERSION_LABEL}" >> "$GITHUB_OUTPUT"
+          echo "staging_tag=${STAGING_TAG}"    >> "$GITHUB_OUTPUT"
+          echo "mode=${MODE}"                  >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "Build mode:           ${MODE}"
+          echo "Version label:        ${VERSION_LABEL}"
+          echo "Tags to publish:      ${TAGS}"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -71,10 +111,10 @@ jobs:
           labels: |
             io.hass.type=supervisor
             io.hass.arch=armv7
-            io.hass.version=${{ steps.version.outputs.tag }}
+            io.hass.version=${{ steps.meta.outputs.version_label }}
             org.opencontainers.image.title=Home Assistant Supervisor
-            org.opencontainers.image.version=${{ steps.version.outputs.tag }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version_label }}
             org.opencontainers.image.source=https://github.com/greenautarky/ha-supervisor
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.tag }}
-            ${{ env.IMAGE }}:latest
+            org.greenautarky.build-mode=${{ steps.meta.outputs.mode }}
+            org.greenautarky.staging-tag=${{ steps.meta.outputs.staging_tag }}
+          tags: ${{ steps.meta.outputs.tags }}
