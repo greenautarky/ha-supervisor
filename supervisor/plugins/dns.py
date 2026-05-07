@@ -41,6 +41,8 @@ from .base import PluginBase
 from .const import (
     ATTR_FALLBACK,
     FILE_HASSIO_DNS,
+    GA_DEFAULT_DNS_FALLBACK,
+    GA_DEFAULT_DNS_SERVERS,
     PLUGIN_UPDATE_CONDITIONS,
     WATCHDOG_THROTTLE_MAX_CALLS,
     WATCHDOG_THROTTLE_PERIOD,
@@ -330,9 +332,10 @@ class PluginDns(PluginBase):
 
     async def reset(self) -> None:
         """Reset DNS and hosts."""
-        # Reset manually defined DNS
-        self.servers.clear()
-        self.fallback = True
+        # Reset manually defined DNS to GA defaults (Cloudflare upstreams, no DoT
+        # fallback) — see plugins/const.py for rationale.
+        self.servers = list(GA_DEFAULT_DNS_SERVERS)
+        self.fallback = GA_DEFAULT_DNS_FALLBACK
         await self.save_data()
 
         # Resets hosts
