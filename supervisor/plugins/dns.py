@@ -41,6 +41,8 @@ from .base import PluginBase
 from .const import (
     ATTR_FALLBACK,
     FILE_HASSIO_DNS,
+    GA_DEFAULT_DNS_FALLBACK,
+    GA_DEFAULT_DNS_SERVERS,
     PLUGIN_UPDATE_CONDITIONS,
     WATCHDOG_THROTTLE_MAX_CALLS,
     WATCHDOG_THROTTLE_PERIOD,
@@ -330,9 +332,10 @@ class PluginDns(PluginBase):
 
     async def reset(self) -> None:
         """Reset DNS and hosts."""
-        # Reset manually defined DNS
-        self.servers.clear()
-        self.fallback = True
+        # Reset manually defined DNS to GA defaults (Cloudflare upstreams, no DoT
+        # fallback) — see plugins/const.py for rationale.
+        self.servers = list(GA_DEFAULT_DNS_SERVERS)
+        self.fallback = GA_DEFAULT_DNS_FALLBACK
         await self.save_data()
 
         # Resets hosts
@@ -419,8 +422,67 @@ class PluginDns(PluginBase):
                 f"Can't update coredns config: {err}", _LOGGER.error
             ) from err
 
+    # Last-resort hardcoded IP — must match the latest GA_SERVICES_IP value in
+    # buildroot-external/rootfs-overlay/etc/ga-services.conf (ha-operating-system).
+    # Only kicks in if every config-file lookup fails (rare).
+    _GA_HARDCODED_FALLBACK_IP = "100.126.142.217"
+
+    _GA_CONF_PATHS = (
+        Path("/mnt/data/ga-services.conf"),    # runtime override (persistent)
+        Path("/os/etc/ga-services.conf"),       # rootfs default (via host mount)
+        Path("/etc/ga-services.conf"),          # fallback (if running on host)
+    )
+
+    @classmethod
+    def _read_ga_conf_value(cls, key: str) -> str | None:
+        """Read a single KEY=value entry from the first existing ga-services.conf."""
+        for conf_path in cls._GA_CONF_PATHS:
+            if conf_path.is_file():
+                for line in conf_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith(f"{key}="):
+                        return line.split("=", 1)[1].strip().strip("'\"")
+        return None
+
+    @classmethod
+    def _load_ga_services_ip(cls) -> str:
+        """Load GA_SERVICES_IP for influx/loki (NetBird-only direct backends)."""
+        return cls._read_ga_conf_value("GA_SERVICES_IP") or cls._GA_HARDCODED_FALLBACK_IP
+
+    @classmethod
+    def _load_ga_ota_ip(cls) -> str:
+        """Load OTA endpoint IP, mirroring the host-side ga-resolve-ota picker.
+
+        Priority (matches host /etc/hosts via ga-update-hosts.service):
+          1. /run/ga-resolve-ota.active or /os/run/... — dynamic pick from
+             ga-resolve-ota.service (NetBird primary, Tailscale, Public).
+             Keeps Supervisor CoreDNS aligned with host /etc/hosts; without
+             this, host and supervisor could resolve ota.* to different IPs
+             during a failover event.
+          2. First IP in GA_OTA_IPS — same priority order ga-resolve-ota uses.
+          3. GA_SERVICES_IP — last fallback before the hardcoded constant.
+        """
+        for active_path in (Path("/run/ga-resolve-ota.active"),
+                            Path("/os/run/ga-resolve-ota.active")):
+            if active_path.is_file():
+                ip = active_path.read_text(encoding="utf-8").strip()
+                if ip:
+                    return ip
+        ga_ota_ips = cls._read_ga_conf_value("GA_OTA_IPS")
+        if ga_ota_ips:
+            first = ga_ota_ips.split()[0] if ga_ota_ips.split() else ""
+            if first:
+                return first
+        return cls._load_ga_services_ip()
+
     async def _init_hosts(self) -> None:
         """Import hosts entry."""
+        # influx/loki always go to GA_SERVICES_IP (NetBird-only direct ports).
+        ga_ip = self._load_ga_services_ip()
+        # ota uses the dynamic failover pick — same as the host /etc/hosts.
+        ga_ota_ip = self._load_ga_ota_ip()
+        _LOGGER.info("GA services IP: %s, GA OTA IP: %s", ga_ip, ga_ota_ip)
+
         # Generate Default
         await asyncio.gather(
             self.add_host(IPv4Address("127.0.0.1"), ["localhost"], write=False),
@@ -436,6 +498,9 @@ class PluginDns(PluginBase):
             ),
             self.add_host(self.sys_docker.network.dns, ["dns"], write=False),
             self.add_host(self.sys_docker.network.observer, ["observer"], write=False),
+            self.add_host(IPv4Address(ga_ip), ["influx.greenautarky.com"], write=False),
+            self.add_host(IPv4Address(ga_ip), ["loki.greenautarky.com"], write=False),
+            self.add_host(IPv4Address(ga_ota_ip), ["ota.greenautarky.com"], write=False),
         )
 
     async def write_hosts(self) -> None:
