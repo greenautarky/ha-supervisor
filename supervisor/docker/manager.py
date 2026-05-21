@@ -59,6 +59,12 @@ MIN_SUPPORTED_DOCKER: Final = AwesomeVersion("24.0.0")
 DOCKER_NETWORK_HOST: Final = "host"
 RE_IMPORT_IMAGE_STREAM = re.compile(r"(^Loaded image ID: |^Loaded image: )(.+)$")
 
+# Pull timeouts — protect against silent registry-stalls on flaky 4G/LTE links
+# that previously left HA-Core down indefinitely while supervisor self-update
+# blocked forever waiting for `docker pull` to make progress.
+PULL_STALL_TIMEOUT: Final = 90      # max seconds with no progress event
+PULL_TOTAL_TIMEOUT: Final = 1800    # absolute hard cap (30 min)
+
 
 @attr.s(frozen=True)
 class CommandReturn:
@@ -436,16 +442,51 @@ class DockerAPI(CoreSysAttributes):
         based on a docker error on pull. Whereas the high level API ignores all errors on pull and
         raises only if the get fails afterwards. Additionally it fires progress reports for the pull
         on the bus so listeners can use that to update status for users.
+
+        Two timeouts protect against the registry-stall that has been observed on flaky 4G/LTE
+        links (e.g. KIB-SON / iHost devices in the field, 2026-05-04):
+          - PULL_STALL_TIMEOUT: rolling — fires when no progress event arrives for N seconds.
+            Each yield from images.pull resets the deadline via the Timeout context.
+          - PULL_TOTAL_TIMEOUT: absolute — fires when the whole pull exceeds the cap.
+        On either trigger we raise DockerError so Supervisor.update treats this as a normal
+        update failure (creates an issue, leaves HA-Core to be restarted by normal monitoring)
+        instead of blocking forever.
         """
-        async for e in self.images.pull(
-            repository, tag=tag, platform=platform, stream=True
-        ):
-            entry = PullLogEntry.from_pull_log_dict(job_id, e)
-            if entry.error:
-                raise entry.exception
-            await asyncio.gather(
-                *self.sys_bus.fire_event(BusEvent.DOCKER_IMAGE_PULL_UPDATE, entry)
-            )
+        image_ref = f"{repository}:{tag}"
+        loop = asyncio.get_event_loop()
+        pull_started = loop.time()
+
+        try:
+            async with asyncio.timeout(PULL_STALL_TIMEOUT) as stall_cm:
+                async for e in self.images.pull(
+                    repository, tag=tag, platform=platform, stream=True
+                ):
+                    # Each progress event refreshes the stall deadline.
+                    stall_cm.reschedule(loop.time() + PULL_STALL_TIMEOUT)
+
+                    # Independent absolute cap — cancels even a slowly-but-steadily
+                    # progressing pull that has been running too long.
+                    if loop.time() - pull_started > PULL_TOTAL_TIMEOUT:
+                        raise DockerError(
+                            f"Pull of {image_ref} exceeded total timeout "
+                            f"{PULL_TOTAL_TIMEOUT}s",
+                            _LOGGER.error,
+                        )
+
+                    entry = PullLogEntry.from_pull_log_dict(job_id, e)
+                    if entry.error:
+                        raise entry.exception
+                    await asyncio.gather(
+                        *self.sys_bus.fire_event(
+                            BusEvent.DOCKER_IMAGE_PULL_UPDATE, entry
+                        )
+                    )
+        except TimeoutError as err:
+            raise DockerError(
+                f"Pull of {image_ref} stalled — no progress for "
+                f"{PULL_STALL_TIMEOUT}s; aborting",
+                _LOGGER.error,
+            ) from err
 
         sep = "@" if tag.startswith("sha256:") else ":"
         return await self.images.inspect(f"{repository}{sep}{tag}")
