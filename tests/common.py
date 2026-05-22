@@ -1,13 +1,14 @@
 """Common test functions."""
 
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime
 from functools import partial
 from importlib import import_module
 from inspect import getclosurevars
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from dbus_fast.aio.message_bus import MessageBus
 
@@ -105,6 +106,20 @@ def reset_last_call(func, group: str | None = None) -> None:
     get_job_decorator(func).set_last_call(datetime.min, group)
 
 
+def is_in_list(a: list, b: list):
+    """Check if all elements in list a are in list b in order.
+
+    Taken from https://stackoverflow.com/a/69175987/12156188.
+    """
+
+    for c in a:
+        if c in b:
+            b = b[b.index(c) :]
+        else:
+            return False
+    return True
+
+
 class MockResponse:
     """Mock response for aiohttp requests."""
 
@@ -131,3 +146,22 @@ class MockResponse:
 
     async def __aexit__(self, exc_type, exc, tb):
         """Exit the context manager."""
+
+
+class AsyncIterator:
+    """Make list/fixture into async iterator for test mocks."""
+
+    def __init__(self, seq: Sequence[Any]) -> None:
+        """Initialize with sequence."""
+        self.iter = iter(seq)
+
+    def __aiter__(self) -> Self:
+        """Implement aiter."""
+        return self
+
+    async def __anext__(self) -> Any:
+        """Return next in sequence."""
+        try:
+            return next(self.iter)
+        except StopIteration:
+            raise StopAsyncIteration() from None

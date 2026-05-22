@@ -9,7 +9,7 @@ from aiohttp import hdrs
 import attr
 from sentry_sdk.types import Event, Hint
 
-from ..const import DOCKER_NETWORK_MASK, HEADER_TOKEN, HEADER_TOKEN_OLD, CoreState
+from ..const import DOCKER_IPV4_NETWORK_MASK, HEADER_TOKEN, HEADER_TOKEN_OLD, CoreState
 from ..coresys import CoreSys
 from ..exceptions import AddonConfigurationError
 
@@ -21,7 +21,7 @@ def sanitize_host(host: str) -> str:
     try:
         # Allow internal URLs
         ip = ipaddress.ip_address(host)
-        if ip in ipaddress.ip_network(DOCKER_NETWORK_MASK):
+        if ip in ipaddress.ip_network(DOCKER_IPV4_NETWORK_MASK):
             return host
     except ValueError:
         pass
@@ -64,6 +64,19 @@ def filter_data(coresys: CoreSys, event: Event, hint: Hint) -> Event | None:
 
     # Not full startup - missing information
     if coresys.core.state in (CoreState.INITIALIZE, CoreState.SETUP):
+        # During SETUP, we have basic system info available for better debugging
+        if coresys.core.state == CoreState.SETUP:
+            event.setdefault("contexts", {}).update(
+                {
+                    "versions": {
+                        "docker": coresys.docker.info.version,
+                        "supervisor": coresys.supervisor.version,
+                    },
+                    "host": {
+                        "machine": coresys.machine,
+                    },
+                }
+            )
         return event
 
     # List installed addons

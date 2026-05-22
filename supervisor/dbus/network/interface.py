@@ -1,5 +1,6 @@
 """NetworkInterface object for Network Manager."""
 
+import logging
 from typing import Any
 
 from dbus_fast.aio.message_bus import MessageBus
@@ -23,11 +24,13 @@ from .connection import NetworkConnection
 from .setting import NetworkSetting
 from .wireless import NetworkWireless
 
+_LOGGER: logging.Logger = logging.getLogger(__name__)
+
 
 class NetworkInterface(DBusInterfaceProxy):
     """NetworkInterface object represents Network Manager Device objects.
 
-    https://developer.gnome.org/NetworkManager/stable/gdbus-org.freedesktop.NetworkManager.Device.html
+    https://networkmanager.dev/docs/api/latest/gdbus-org.freedesktop.NetworkManager.Device.html
     """
 
     bus_name: str = DBUS_NAME_NM
@@ -49,7 +52,7 @@ class NetworkInterface(DBusInterfaceProxy):
 
     @property
     @dbus_property
-    def name(self) -> str:
+    def interface_name(self) -> str:
         """Return interface name."""
         return self.properties[DBUS_ATTR_DEVICE_INTERFACE]
 
@@ -57,7 +60,15 @@ class NetworkInterface(DBusInterfaceProxy):
     @dbus_property
     def type(self) -> DeviceType:
         """Return interface type."""
-        return self.properties[DBUS_ATTR_DEVICE_TYPE]
+        try:
+            return DeviceType(self.properties[DBUS_ATTR_DEVICE_TYPE])
+        except ValueError:
+            _LOGGER.debug(
+                "Unknown device type %s for %s, treating as UNKNOWN",
+                self.properties[DBUS_ATTR_DEVICE_TYPE],
+                self.object_path,
+            )
+            return DeviceType.UNKNOWN
 
     @property
     @dbus_property

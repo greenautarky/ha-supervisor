@@ -15,7 +15,8 @@ from awesomeversion import AwesomeVersion
 import jinja2
 import voluptuous as vol
 
-from ..const import ATTR_SERVERS, DNS_SUFFIX, LogLevel
+from ..bus import EventListener
+from ..const import ATTR_SERVERS, DNS_SUFFIX, BusEvent, LogLevel
 from ..coresys import CoreSys
 from ..dbus.const import MulticastProtocolEnabled
 from ..docker.const import ContainerState
@@ -28,8 +29,9 @@ from ..exceptions import (
     CoreDNSJobError,
     CoreDNSUpdateError,
     DockerError,
+    PluginError,
 )
-from ..jobs.const import JobExecutionLimit
+from ..jobs.const import JobThrottle
 from ..jobs.decorator import Job
 from ..resolution.const import ContextType, IssueType, SuggestionType, UnhealthyReason
 from ..utils.json import write_json_file
@@ -39,6 +41,8 @@ from .base import PluginBase
 from .const import (
     ATTR_FALLBACK,
     FILE_HASSIO_DNS,
+    GA_DEFAULT_DNS_FALLBACK,
+    GA_DEFAULT_DNS_SERVERS,
     PLUGIN_UPDATE_CONDITIONS,
     WATCHDOG_THROTTLE_MAX_CALLS,
     WATCHDOG_THROTTLE_PERIOD,
@@ -71,11 +75,17 @@ class PluginDns(PluginBase):
         self.slug = "dns"
         self.coresys: CoreSys = coresys
         self.instance: DockerDNS = DockerDNS(coresys)
-        self.resolv_template: jinja2.Template | None = None
-        self.hosts_template: jinja2.Template | None = None
+        self._resolv_template: jinja2.Template | None = None
+        self._hosts_template: jinja2.Template | None = None
 
         self._hosts: list[HostEntry] = []
         self._loop: bool = False
+        self._cached_locals: list[str] | None = None
+
+        # Debouncing system for rapid local changes
+        self._locals_changed_handle: asyncio.TimerHandle | None = None
+        self._restart_after_locals_change_handle: asyncio.Task | None = None
+        self._connectivity_check_listener: EventListener | None = None
 
     @property
     def hosts(self) -> Path:
@@ -90,6 +100,15 @@ class PluginDns(PluginBase):
     @property
     def locals(self) -> list[str]:
         """Return list of local system DNS servers."""
+        if self._cached_locals is None:
+            self._cached_locals = self._compute_locals()
+        return self._cached_locals
+
+    def _compute_locals(self) -> list[str]:
+        """Compute list of local system DNS servers.
+
+        Returns servers in stable priority order from NetworkManager.
+        """
         servers: list[str] = []
         for server in [
             f"dns://{server!s}" for server in self.sys_host.network.dns_servers
@@ -98,6 +117,52 @@ class PluginDns(PluginBase):
                 servers.append(dns_url(server))
 
         return servers
+
+    async def _on_dns_container_running(self, event: DockerContainerStateEvent) -> None:
+        """Handle DNS container state change to running and trigger connectivity check."""
+        if event.name == self.instance.name and event.state == ContainerState.RUNNING:
+            # Wait before CoreDNS actually becomes available
+            await asyncio.sleep(5)
+
+            _LOGGER.debug("CoreDNS started, checking connectivity")
+            await self.sys_supervisor.check_connectivity()
+
+    async def _restart_dns_after_locals_change(self) -> None:
+        """Restart DNS after a debounced delay for local changes."""
+        old_locals = self._cached_locals
+        new_locals = self._compute_locals()
+        if old_locals == new_locals:
+            return
+
+        _LOGGER.debug("DNS locals changed from %s to %s", old_locals, new_locals)
+        self._cached_locals = new_locals
+        if not await self.instance.is_running():
+            return
+
+        await self.restart()
+        self._restart_after_locals_change_handle = None
+
+    def _trigger_restart_dns_after_locals_change(self) -> None:
+        """Trigger a restart of DNS after local changes."""
+        # Cancel existing restart task if any
+        if self._restart_after_locals_change_handle:
+            self._restart_after_locals_change_handle.cancel()
+
+        self._restart_after_locals_change_handle = self.sys_create_task(
+            self._restart_dns_after_locals_change()
+        )
+        self._locals_changed_handle = None
+
+    def notify_locals_changed(self) -> None:
+        """Schedule a debounced DNS restart for local changes."""
+        # Cancel existing timer if any
+        if self._locals_changed_handle:
+            self._locals_changed_handle.cancel()
+
+        # Schedule new timer with 1 second delay
+        self._locals_changed_handle = self.sys_call_later(
+            1.0, self._trigger_restart_dns_after_locals_change
+        )
 
     @property
     def servers(self) -> list[str]:
@@ -147,11 +212,25 @@ class PluginDns(PluginBase):
         """Set fallback DNS enabled."""
         self._data[ATTR_FALLBACK] = value
 
+    @property
+    def hosts_template(self) -> jinja2.Template:
+        """Get hosts jinja template."""
+        if not self._hosts_template:
+            raise RuntimeError("Hosts template not set!")
+        return self._hosts_template
+
+    @property
+    def resolv_template(self) -> jinja2.Template:
+        """Get resolv jinja template."""
+        if not self._resolv_template:
+            raise RuntimeError("Resolv template not set!")
+        return self._resolv_template
+
     async def load(self) -> None:
         """Load DNS setup."""
         # Initialize CoreDNS Template
         try:
-            self.resolv_template = jinja2.Template(
+            self._resolv_template = jinja2.Template(
                 await self.sys_run_in_executor(RESOLV_TMPL.read_text, encoding="utf-8")
             )
         except OSError as err:
@@ -162,7 +241,7 @@ class PluginDns(PluginBase):
             _LOGGER.error("Can't read resolve.tmpl: %s", err)
 
         try:
-            self.hosts_template = jinja2.Template(
+            self._hosts_template = jinja2.Template(
                 await self.sys_run_in_executor(HOSTS_TMPL.read_text, encoding="utf-8")
             )
         except OSError as err:
@@ -173,10 +252,19 @@ class PluginDns(PluginBase):
             _LOGGER.error("Can't read hosts.tmpl: %s", err)
 
         await self._init_hosts()
+
+        # Register Docker event listener for connectivity checks
+        if not self._connectivity_check_listener:
+            self._connectivity_check_listener = self.sys_bus.register_event(
+                BusEvent.DOCKER_CONTAINER_STATE_CHANGE, self._on_dns_container_running
+            )
+
         await super().load()
 
         # Update supervisor
-        await self._write_resolv(HOST_RESOLV)
+        # Resolv template should always be set but just in case don't fail load
+        if self._resolv_template:
+            await self._write_resolv(HOST_RESOLV)
 
         # Reinitializing aiohttp.ClientSession after DNS setup makes sure that
         # aiodns is using the right DNS servers (see #5857).
@@ -201,7 +289,7 @@ class PluginDns(PluginBase):
         """Update CoreDNS plugin."""
         try:
             await super().update(version)
-        except DockerError as err:
+        except (DockerError, PluginError) as err:
             raise CoreDNSUpdateError("CoreDNS update failed", _LOGGER.error) from err
 
     async def restart(self) -> None:
@@ -211,7 +299,7 @@ class PluginDns(PluginBase):
         try:
             await self.instance.restart()
         except DockerError as err:
-            raise CoreDNSError("Can't start CoreDNS plugin", _LOGGER.error) from err
+            raise CoreDNSError("Can't restart CoreDNS plugin", _LOGGER.error) from err
 
     async def start(self) -> None:
         """Run CoreDNS."""
@@ -226,6 +314,16 @@ class PluginDns(PluginBase):
 
     async def stop(self) -> None:
         """Stop CoreDNS."""
+        # Cancel any pending locals change timer
+        if self._locals_changed_handle:
+            self._locals_changed_handle.cancel()
+            self._locals_changed_handle = None
+
+        # Wait for any pending restart before stopping
+        if self._restart_after_locals_change_handle:
+            self._restart_after_locals_change_handle.cancel()
+            self._restart_after_locals_change_handle = None
+
         _LOGGER.info("Stopping CoreDNS plugin")
         try:
             await self.instance.stop()
@@ -234,9 +332,10 @@ class PluginDns(PluginBase):
 
     async def reset(self) -> None:
         """Reset DNS and hosts."""
-        # Reset manually defined DNS
-        self.servers.clear()
-        self.fallback = True
+        # Reset manually defined DNS to GA defaults (Cloudflare upstreams, no DoT
+        # fallback) — see plugins/const.py for rationale.
+        self.servers = list(GA_DEFAULT_DNS_SERVERS)
+        self.fallback = GA_DEFAULT_DNS_FALLBACK
         await self.save_data()
 
         # Resets hosts
@@ -258,10 +357,10 @@ class PluginDns(PluginBase):
 
     @Job(
         name="plugin_dns_restart_after_problem",
-        limit=JobExecutionLimit.THROTTLE_RATE_LIMIT,
         throttle_period=WATCHDOG_THROTTLE_PERIOD,
         throttle_max_calls=WATCHDOG_THROTTLE_MAX_CALLS,
         on_condition=CoreDNSJobError,
+        throttle=JobThrottle.RATE_LIMIT,
     )
     async def _restart_after_problem(self, state: ContainerState):
         """Restart unhealthy or failed plugin."""
@@ -323,8 +422,67 @@ class PluginDns(PluginBase):
                 f"Can't update coredns config: {err}", _LOGGER.error
             ) from err
 
+    # Last-resort hardcoded IP — must match the latest GA_SERVICES_IP value in
+    # buildroot-external/rootfs-overlay/etc/ga-services.conf (ha-operating-system).
+    # Only kicks in if every config-file lookup fails (rare).
+    _GA_HARDCODED_FALLBACK_IP = "100.126.142.217"
+
+    _GA_CONF_PATHS = (
+        Path("/mnt/data/ga-services.conf"),    # runtime override (persistent)
+        Path("/os/etc/ga-services.conf"),       # rootfs default (via host mount)
+        Path("/etc/ga-services.conf"),          # fallback (if running on host)
+    )
+
+    @classmethod
+    def _read_ga_conf_value(cls, key: str) -> str | None:
+        """Read a single KEY=value entry from the first existing ga-services.conf."""
+        for conf_path in cls._GA_CONF_PATHS:
+            if conf_path.is_file():
+                for line in conf_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith(f"{key}="):
+                        return line.split("=", 1)[1].strip().strip("'\"")
+        return None
+
+    @classmethod
+    def _load_ga_services_ip(cls) -> str:
+        """Load GA_SERVICES_IP for influx/loki (NetBird-only direct backends)."""
+        return cls._read_ga_conf_value("GA_SERVICES_IP") or cls._GA_HARDCODED_FALLBACK_IP
+
+    @classmethod
+    def _load_ga_ota_ip(cls) -> str:
+        """Load OTA endpoint IP, mirroring the host-side ga-resolve-ota picker.
+
+        Priority (matches host /etc/hosts via ga-update-hosts.service):
+          1. /run/ga-resolve-ota.active or /os/run/... — dynamic pick from
+             ga-resolve-ota.service (NetBird primary, Tailscale, Public).
+             Keeps Supervisor CoreDNS aligned with host /etc/hosts; without
+             this, host and supervisor could resolve ota.* to different IPs
+             during a failover event.
+          2. First IP in GA_OTA_IPS — same priority order ga-resolve-ota uses.
+          3. GA_SERVICES_IP — last fallback before the hardcoded constant.
+        """
+        for active_path in (Path("/run/ga-resolve-ota.active"),
+                            Path("/os/run/ga-resolve-ota.active")):
+            if active_path.is_file():
+                ip = active_path.read_text(encoding="utf-8").strip()
+                if ip:
+                    return ip
+        ga_ota_ips = cls._read_ga_conf_value("GA_OTA_IPS")
+        if ga_ota_ips:
+            first = ga_ota_ips.split()[0] if ga_ota_ips.split() else ""
+            if first:
+                return first
+        return cls._load_ga_services_ip()
+
     async def _init_hosts(self) -> None:
         """Import hosts entry."""
+        # influx/loki always go to GA_SERVICES_IP (NetBird-only direct ports).
+        ga_ip = self._load_ga_services_ip()
+        # ota uses the dynamic failover pick — same as the host /etc/hosts.
+        ga_ota_ip = self._load_ga_ota_ip()
+        _LOGGER.info("GA services IP: %s, GA OTA IP: %s", ga_ip, ga_ota_ip)
+
         # Generate Default
         await asyncio.gather(
             self.add_host(IPv4Address("127.0.0.1"), ["localhost"], write=False),
@@ -340,6 +498,9 @@ class PluginDns(PluginBase):
             ),
             self.add_host(self.sys_docker.network.dns, ["dns"], write=False),
             self.add_host(self.sys_docker.network.observer, ["observer"], write=False),
+            self.add_host(IPv4Address(ga_ip), ["influx.greenautarky.com"], write=False),
+            self.add_host(IPv4Address(ga_ip), ["loki.greenautarky.com"], write=False),
+            self.add_host(IPv4Address(ga_ota_ip), ["ota.greenautarky.com"], write=False),
         )
 
     async def write_hosts(self) -> None:
@@ -428,12 +589,6 @@ class PluginDns(PluginBase):
 
     async def _write_resolv(self, resolv_conf: Path) -> None:
         """Update/Write resolv.conf file."""
-        if not self.resolv_template:
-            _LOGGER.warning(
-                "Resolv template is missing, cannot write/update %s", resolv_conf
-            )
-            return
-
         nameservers = [str(self.sys_docker.network.dns), "127.0.0.11"]
 
         # Read resolv config

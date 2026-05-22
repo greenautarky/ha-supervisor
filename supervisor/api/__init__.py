@@ -8,7 +8,7 @@ from typing import Any
 
 from aiohttp import hdrs, web
 
-from ..const import AddonState
+from ..const import SUPERVISOR_DOCKER_NAME, AddonState
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import APIAddonNotInstalled, HostNotSupportedError
 from ..utils.sentry import async_capture_exception
@@ -147,6 +147,15 @@ class RestAPI(CoreSysAttributes):
                     ),
                 ),
                 web.get(
+                    f"{path}/logs/latest",
+                    partial(
+                        self._api_host.advanced_logs,
+                        identifier=syslog_identifier,
+                        latest=True,
+                        no_colors=True,
+                    ),
+                ),
+                web.get(
                     f"{path}/logs/boots/{{bootid}}",
                     partial(self._api_host.advanced_logs, identifier=syslog_identifier),
                 ),
@@ -198,6 +207,7 @@ class RestAPI(CoreSysAttributes):
                 web.post("/host/reload", api_host.reload),
                 web.post("/host/options", api_host.options),
                 web.get("/host/services", api_host.services),
+                web.get("/host/disks/default/usage", api_host.disk_usage),
             ]
         )
 
@@ -426,7 +436,7 @@ class RestAPI(CoreSysAttributes):
         async def get_supervisor_logs(*args, **kwargs):
             try:
                 return await self._api_host.advanced_logs_handler(
-                    *args, identifier="hassio_supervisor", **kwargs
+                    *args, identifier=SUPERVISOR_DOCKER_NAME, **kwargs
                 )
             except Exception as err:  # pylint: disable=broad-exception-caught
                 # Supervisor logs are critical, so catch everything, log the exception
@@ -439,6 +449,8 @@ class RestAPI(CoreSysAttributes):
                     # is known and reported to the user using the resolution center.
                     await async_capture_exception(err)
                 kwargs.pop("follow", None)  # Follow is not supported for Docker logs
+                kwargs.pop("latest", None)  # Latest is not supported for Docker logs
+                kwargs.pop("no_colors", None)  # no_colors not supported for Docker logs
                 return await api_supervisor.logs(*args, **kwargs)
 
         self.webapp.add_routes(
@@ -447,6 +459,10 @@ class RestAPI(CoreSysAttributes):
                 web.get(
                     "/supervisor/logs/follow",
                     partial(get_supervisor_logs, follow=True),
+                ),
+                web.get(
+                    "/supervisor/logs/latest",
+                    partial(get_supervisor_logs, latest=True, no_colors=True),
                 ),
                 web.get("/supervisor/logs/boots/{bootid}", get_supervisor_logs),
                 web.get(
@@ -559,6 +575,10 @@ class RestAPI(CoreSysAttributes):
                 web.get(
                     "/addons/{addon}/logs/follow",
                     partial(get_addon_logs, follow=True),
+                ),
+                web.get(
+                    "/addons/{addon}/logs/latest",
+                    partial(get_addon_logs, latest=True, no_colors=True),
                 ),
                 web.get("/addons/{addon}/logs/boots/{bootid}", get_addon_logs),
                 web.get(
@@ -734,6 +754,10 @@ class RestAPI(CoreSysAttributes):
                     "/store/addons/{addon}/documentation",
                     api_store.addons_addon_documentation,
                 ),
+                web.get(
+                    "/store/addons/{addon}/availability",
+                    api_store.addons_addon_availability,
+                ),
                 web.post(
                     "/store/addons/{addon}/install", api_store.addons_addon_install
                 ),
@@ -789,6 +813,7 @@ class RestAPI(CoreSysAttributes):
         self.webapp.add_routes(
             [
                 web.get("/docker/info", api_docker.info),
+                web.post("/docker/options", api_docker.options),
                 web.get("/docker/registries", api_docker.registries),
                 web.post("/docker/registries", api_docker.create_registry),
                 web.delete("/docker/registries/{hostname}", api_docker.remove_registry),

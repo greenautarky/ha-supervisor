@@ -9,7 +9,7 @@ from ..const import DOCKER_CPU_RUNTIME_ALLOCATION
 from ..coresys import CoreSysAttributes
 from ..exceptions import DockerJobError
 from ..hardware.const import PolicyGroup
-from ..jobs.const import JobExecutionLimit
+from ..jobs.const import JobConcurrency
 from ..jobs.decorator import Job
 from .const import (
     ENV_TIME,
@@ -47,7 +47,7 @@ class DockerAudio(DockerInterface, CoreSysAttributes):
         mounts = [
             MOUNT_DEV,
             Mount(
-                type=MountType.BIND,
+                type=MountType.BIND.value,
                 source=self.sys_config.path_extern_audio.as_posix(),
                 target=PATH_PRIVATE_DATA.as_posix(),
                 read_only=False,
@@ -89,8 +89,8 @@ class DockerAudio(DockerInterface, CoreSysAttributes):
 
     @Job(
         name="docker_audio_run",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=DockerJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def run(self) -> None:
         """Run Docker image."""

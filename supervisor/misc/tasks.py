@@ -2,9 +2,10 @@
 
 from datetime import datetime, timedelta
 import logging
+from typing import cast
 
 from ..addons.const import ADDON_UPDATE_CONDITIONS
-from ..backups.const import LOCATION_CLOUD_BACKUP
+from ..backups.const import LOCATION_CLOUD_BACKUP, LOCATION_TYPE
 from ..const import ATTR_TYPE, AddonState
 from ..coresys import CoreSysAttributes
 from ..exceptions import (
@@ -14,7 +15,8 @@ from ..exceptions import (
     ObserverError,
 )
 from ..homeassistant.const import LANDINGPAGE, WSType
-from ..jobs.decorator import Job, JobCondition, JobExecutionLimit
+from ..jobs.const import JobConcurrency
+from ..jobs.decorator import Job, JobCondition
 from ..plugins.const import PLUGIN_UPDATE_CONDITIONS
 from ..utils.dt import utcnow
 from ..utils.sentry import async_capture_exception
@@ -157,9 +159,11 @@ class Tasks(CoreSysAttributes):
             JobCondition.FREE_SPACE,
             JobCondition.HEALTHY,
             JobCondition.INTERNET_HOST,
+            JobCondition.OS_SUPPORTED,
             JobCondition.RUNNING,
+            JobCondition.ARCHITECTURE_SUPPORTED,
         ],
-        limit=JobExecutionLimit.ONCE,
+        concurrency=JobConcurrency.REJECT,
     )
     async def _update_supervisor(self):
         """Check and run update of Supervisor Supervisor."""
@@ -353,7 +357,14 @@ class Tasks(CoreSysAttributes):
             finally:
                 self._cache[addon.slug] = 0
 
-    @Job(name="tasks_reload_store", conditions=[JobCondition.SUPERVISOR_UPDATED])
+    @Job(
+        name="tasks_reload_store",
+        conditions=[
+            JobCondition.SUPERVISOR_UPDATED,
+            JobCondition.OS_SUPPORTED,
+            JobCondition.HOME_ASSISTANT_CORE_SUPPORTED,
+        ],
+    )
     async def _reload_store(self) -> None:
         """Reload store and check for addon updates."""
         await self.sys_store.reload()
@@ -378,6 +389,8 @@ class Tasks(CoreSysAttributes):
         ]
         for backup in old_backups:
             try:
-                await self.sys_backups.remove(backup, [LOCATION_CLOUD_BACKUP])
+                await self.sys_backups.remove(
+                    backup, [cast(LOCATION_TYPE, LOCATION_CLOUD_BACKUP)]
+                )
             except BackupFileNotFoundError as err:
                 _LOGGER.debug("Can't remove backup %s: %s", backup.slug, err)

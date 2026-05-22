@@ -35,6 +35,7 @@ from ..const import (
     FILE_HASSIO_HOMEASSISTANT,
     BusEvent,
     IngressSessionDataUser,
+    IngressSessionDataUserDict,
 )
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import (
@@ -45,7 +46,8 @@ from ..exceptions import (
 )
 from ..hardware.const import PolicyGroup
 from ..hardware.data import Device
-from ..jobs.decorator import Job, JobExecutionLimit
+from ..jobs.const import JobConcurrency, JobThrottle
+from ..jobs.decorator import Job
 from ..resolution.const import UnhealthyReason
 from ..utils import remove_folder, remove_folder_with_excludes
 from ..utils.common import FileConfiguration
@@ -550,25 +552,19 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
 
     @Job(
         name="home_assistant_get_users",
-        limit=JobExecutionLimit.THROTTLE_WAIT,
         throttle_period=timedelta(minutes=5),
         internal=True,
+        concurrency=JobConcurrency.QUEUE,
+        throttle=JobThrottle.THROTTLE,
     )
     async def get_users(self) -> list[IngressSessionDataUser]:
         """Get list of all configured users."""
         list_of_users: (
-            list[dict[str, Any]] | None
+            list[IngressSessionDataUserDict] | None
         ) = await self.sys_homeassistant.websocket.async_send_command(
             {ATTR_TYPE: "config/auth/list"}
         )
 
         if list_of_users:
-            return [
-                IngressSessionDataUser(
-                    id=data["id"],
-                    username=data.get("username"),
-                    display_name=data.get("name"),
-                )
-                for data in list_of_users
-            ]
+            return [IngressSessionDataUser.from_dict(data) for data in list_of_users]
         return []

@@ -2,6 +2,7 @@
 
 import logging
 
+from ...const import BusEvent
 from ...coresys import CoreSys
 from ...exceptions import (
     ResolutionFixupError,
@@ -32,6 +33,9 @@ class FixupStoreExecuteReload(FixupBase):
     )
     async def process_fixup(self, reference: str | None = None) -> None:
         """Initialize the fixup class."""
+        if not reference:
+            return
+
         _LOGGER.info("Reload Store: %s", reference)
         try:
             repository = self.sys_store.get(reference)
@@ -65,3 +69,8 @@ class FixupStoreExecuteReload(FixupBase):
     def auto(self) -> bool:
         """Return if a fixup can be apply as auto fix."""
         return True
+
+    @property
+    def bus_event(self) -> BusEvent | None:
+        """Return the BusEvent that triggers this fixup, or None if not event-based."""
+        return BusEvent.SUPERVISOR_CONNECTIVITY_CHANGE

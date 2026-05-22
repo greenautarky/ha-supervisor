@@ -32,6 +32,7 @@ from ..const import (
     ATTR_DISCOVERY,
     ATTR_DOCKER_API,
     ATTR_ENVIRONMENT,
+    ATTR_FIELDS,
     ATTR_FULL_ACCESS,
     ATTR_GPIO,
     ATTR_HASSIO_API,
@@ -87,6 +88,7 @@ from ..const import (
     ATTR_TYPE,
     ATTR_UART,
     ATTR_UDEV,
+    ATTR_ULIMITS,
     ATTR_URL,
     ATTR_USB,
     ATTR_USER,
@@ -137,7 +139,19 @@ RE_DOCKER_IMAGE_BUILD = re.compile(
     r"^([a-zA-Z\-\.:\d{}]+/)*?([\-\w{}]+)/([\-\w{}]+)(:[\.\-\w{}]+)?$"
 )
 
-SCHEMA_ELEMENT = vol.Match(RE_SCHEMA_ELEMENT)
+SCHEMA_ELEMENT = vol.Schema(
+    vol.Any(
+        vol.Match(RE_SCHEMA_ELEMENT),
+        [
+            # A list may not directly contain another list
+            vol.Any(
+                vol.Match(RE_SCHEMA_ELEMENT),
+                {str: vol.Self},
+            )
+        ],
+        {str: vol.Self},
+    )
+)
 
 RE_MACHINE = re.compile(
     r"^!?(?:"
@@ -190,6 +204,12 @@ def _warn_addon_config(config: dict[str, Any]):
     ):
         _LOGGER.warning(
             "Add-on which only support COLD backups trying to use post/pre commands. Please report this to the maintainer of %s",
+            name,
+        )
+
+    if ATTR_CODENOTARY in config:
+        _LOGGER.warning(
+            "Add-on '%s' uses deprecated 'codenotary' field in config. This field is no longer used and will be ignored. Please report this to the maintainer.",
             name,
         )
 
@@ -266,10 +286,23 @@ def _migrate_addon_config(protocol=False):
         volumes = []
         for entry in config.get(ATTR_MAP, []):
             if isinstance(entry, dict):
+                # Validate that dict entries have required 'type' field
+                if ATTR_TYPE not in entry:
+                    _LOGGER.warning(
+                        "Add-on config has invalid map entry missing 'type' field: %s. Skipping invalid entry for %s",
+                        entry,
+                        name,
+                    )
+                    continue
                 volumes.append(entry)
             if isinstance(entry, str):
                 result = RE_VOLUME.match(entry)
                 if not result:
+                    _LOGGER.warning(
+                        "Add-on config has invalid map entry: %s. Skipping invalid entry for %s",
+                        entry,
+                        name,
+                    )
                     continue
                 volumes.append(
                     {
@@ -278,8 +311,8 @@ def _migrate_addon_config(protocol=False):
                     }
                 )
 
-        if volumes:
-            config[ATTR_MAP] = volumes
+        # Always update config to clear potentially malformed ones
+        config[ATTR_MAP] = volumes
 
         # 2023-10 "config" became "homeassistant" so /config can be used for addon's public config
         if any(volume[ATTR_TYPE] == MappingType.CONFIG for volume in volumes):
@@ -390,26 +423,26 @@ _SCHEMA_ADDON_CONFIG = vol.Schema(
         vol.Optional(ATTR_BACKUP, default=AddonBackupMode.HOT): vol.Coerce(
             AddonBackupMode
         ),
-        vol.Optional(ATTR_CODENOTARY): vol.Email(),
         vol.Optional(ATTR_OPTIONS, default={}): dict,
         vol.Optional(ATTR_SCHEMA, default={}): vol.Any(
-            vol.Schema(
-                {
-                    str: vol.Any(
-                        SCHEMA_ELEMENT,
-                        [
-                            vol.Any(
-                                SCHEMA_ELEMENT,
-                                {str: vol.Any(SCHEMA_ELEMENT, [SCHEMA_ELEMENT])},
-                            )
-                        ],
-                        vol.Schema({str: vol.Any(SCHEMA_ELEMENT, [SCHEMA_ELEMENT])}),
-                    )
-                }
-            ),
+            vol.Schema({str: SCHEMA_ELEMENT}),
             False,
         ),
         vol.Optional(ATTR_IMAGE): docker_image,
+        vol.Optional(ATTR_ULIMITS, default=dict): vol.Any(
+            {str: vol.Coerce(int)},  # Simple format: {name: limit}
+            {
+                str: vol.Any(
+                    vol.Coerce(int),  # Simple format for individual entries
+                    vol.Schema(
+                        {  # Detailed format for individual entries
+                            vol.Required("soft"): vol.Coerce(int),
+                            vol.Required("hard"): vol.Coerce(int),
+                        }
+                    ),
+                )
+            },
+        ),
         vol.Optional(ATTR_TIMEOUT, default=10): vol.All(
             vol.Coerce(int), vol.Range(min=10, max=300)
         ),
@@ -442,6 +475,7 @@ SCHEMA_TRANSLATION_CONFIGURATION = vol.Schema(
     {
         vol.Required(ATTR_NAME): str,
         vol.Optional(ATTR_DESCRIPTON): vol.Maybe(str),
+        vol.Optional(ATTR_FIELDS): {str: vol.Self},
     },
     extra=vol.REMOVE_EXTRA,
 )

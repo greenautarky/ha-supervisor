@@ -1,31 +1,35 @@
 """Test homeassistant api."""
 
+import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from aiohttp.test_utils import TestClient
 from awesomeversion import AwesomeVersion
 import pytest
 
+from supervisor.backups.manager import BackupManager
+from supervisor.const import CoreState
 from supervisor.coresys import CoreSys
-from supervisor.homeassistant.api import APIState
+from supervisor.docker.homeassistant import DockerHomeAssistant
+from supervisor.docker.interface import DockerInterface
+from supervisor.homeassistant.api import APIState, HomeAssistantAPI
+from supervisor.homeassistant.const import WSEvent
 from supervisor.homeassistant.core import HomeAssistantCore
 from supervisor.homeassistant.module import HomeAssistant
 
-from tests.api import common_test_api_advanced_logs
-from tests.common import load_json_fixture
+from tests.common import AsyncIterator, load_json_fixture
 
 
 @pytest.mark.parametrize("legacy_route", [True, False])
 async def test_api_core_logs(
-    api_client: TestClient, journald_logs: MagicMock, legacy_route: bool
+    advanced_logs_tester: AsyncMock,
+    legacy_route: bool,
 ):
     """Test core logs."""
-    await common_test_api_advanced_logs(
+    await advanced_logs_tester(
         f"/{'homeassistant' if legacy_route else 'core'}",
         "homeassistant",
-        api_client,
-        journald_logs,
     )
 
 
@@ -188,3 +192,170 @@ async def test_force_stop_during_migration(api_client: TestClient, coresys: Core
     with patch.object(HomeAssistantCore, "stop") as stop:
         await api_client.post("/homeassistant/stop", json={"force": True})
         stop.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("make_backup", "backup_called", "update_called"),
+    [(True, True, False), (False, False, True)],
+)
+async def test_home_assistant_background_update(
+    api_client: TestClient,
+    coresys: CoreSys,
+    make_backup: bool,
+    backup_called: bool,
+    update_called: bool,
+):
+    """Test background update of Home Assistant."""
+    coresys.hardware.disk.get_disk_free_space = lambda x: 5000
+    event = asyncio.Event()
+    mock_update_called = mock_backup_called = False
+
+    # Mock backup/update as long-running tasks
+    async def mock_docker_interface_update(*args, **kwargs):
+        nonlocal mock_update_called
+        mock_update_called = True
+        await event.wait()
+
+    async def mock_partial_backup(*args, **kwargs):
+        nonlocal mock_backup_called
+        mock_backup_called = True
+        await event.wait()
+
+    with (
+        patch.object(DockerInterface, "update", new=mock_docker_interface_update),
+        patch.object(BackupManager, "do_backup_partial", new=mock_partial_backup),
+        patch.object(
+            DockerInterface,
+            "version",
+            new=PropertyMock(return_value=AwesomeVersion("2025.8.0")),
+        ),
+    ):
+        resp = await api_client.post(
+            "/core/update",
+            json={"background": True, "backup": make_backup, "version": "2025.8.3"},
+        )
+
+    assert mock_backup_called is backup_called
+    assert mock_update_called is update_called
+
+    assert resp.status == 200
+    body = await resp.json()
+    assert (job := coresys.jobs.get_job(body["data"]["job_id"]))
+    assert job.name == "home_assistant_core_update"
+    event.set()
+
+
+async def test_background_home_assistant_update_fails_fast(
+    api_client: TestClient, coresys: CoreSys
+):
+    """Test background Home Assistant update returns error not job if validation doesn't succeed."""
+    coresys.hardware.disk.get_disk_free_space = lambda x: 5000
+
+    with (
+        patch.object(
+            DockerInterface,
+            "version",
+            new=PropertyMock(return_value=AwesomeVersion("2025.8.3")),
+        ),
+    ):
+        resp = await api_client.post(
+            "/core/update",
+            json={"background": True, "version": "2025.8.3"},
+        )
+
+    assert resp.status == 400
+    body = await resp.json()
+    assert body["message"] == "Version 2025.8.3 is already installed"
+
+
+@pytest.mark.usefixtures("tmp_supervisor_data")
+async def test_api_progress_updates_home_assistant_update(
+    api_client: TestClient, coresys: CoreSys, ha_ws_client: AsyncMock
+):
+    """Test progress updates sent to Home Assistant for updates."""
+    coresys.hardware.disk.get_disk_free_space = lambda x: 5000
+    coresys.core.set_state(CoreState.RUNNING)
+
+    logs = load_json_fixture("docker_pull_image_log.json")
+    coresys.docker.images.pull.return_value = AsyncIterator(logs)
+    coresys.homeassistant.version = AwesomeVersion("2025.8.0")
+
+    with (
+        patch.object(
+            DockerHomeAssistant,
+            "version",
+            new=PropertyMock(return_value=AwesomeVersion("2025.8.0")),
+        ),
+        patch.object(
+            HomeAssistantAPI, "get_config", return_value={"components": ["frontend"]}
+        ),
+    ):
+        resp = await api_client.post("/core/update", json={"version": "2025.8.3"})
+
+    assert resp.status == 200
+
+    events = [
+        {
+            "stage": evt.args[0]["data"]["data"]["stage"],
+            "progress": evt.args[0]["data"]["data"]["progress"],
+            "done": evt.args[0]["data"]["data"]["done"],
+        }
+        for evt in ha_ws_client.async_send_command.call_args_list
+        if "data" in evt.args[0]
+        and evt.args[0]["data"]["event"] == WSEvent.JOB
+        and evt.args[0]["data"]["data"]["name"] == "home_assistant_core_update"
+    ]
+    assert events[:5] == [
+        {
+            "stage": None,
+            "progress": 0,
+            "done": None,
+        },
+        {
+            "stage": None,
+            "progress": 0,
+            "done": False,
+        },
+        {
+            "stage": None,
+            "progress": 0.1,
+            "done": False,
+        },
+        {
+            "stage": None,
+            "progress": 1.2,
+            "done": False,
+        },
+        {
+            "stage": None,
+            "progress": 2.8,
+            "done": False,
+        },
+    ]
+    assert events[-5:] == [
+        {
+            "stage": None,
+            "progress": 97.2,
+            "done": False,
+        },
+        {
+            "stage": None,
+            "progress": 98.4,
+            "done": False,
+        },
+        {
+            "stage": None,
+            "progress": 99.4,
+            "done": False,
+        },
+        {
+            "stage": None,
+            "progress": 100,
+            "done": False,
+        },
+        {
+            "stage": None,
+            "progress": 100,
+            "done": True,
+        },
+    ]

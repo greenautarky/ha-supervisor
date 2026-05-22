@@ -199,21 +199,25 @@ class APIIngress(CoreSysAttributes):
             url = f"{url}?{request.query_string}"
 
         # Start proxy
-        async with self.sys_websession.ws_connect(
-            url,
-            headers=source_header,
-            protocols=req_protocols,
-            autoclose=False,
-            autoping=False,
-        ) as ws_client:
-            # Proxy requests
-            await asyncio.wait(
-                [
-                    self.sys_create_task(_websocket_forward(ws_server, ws_client)),
-                    self.sys_create_task(_websocket_forward(ws_client, ws_server)),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+        try:
+            _LOGGER.debug("Proxing WebSocket to %s, upstream url: %s", addon.slug, url)
+            async with self.sys_websession.ws_connect(
+                url,
+                headers=source_header,
+                protocols=req_protocols,
+                autoclose=False,
+                autoping=False,
+            ) as ws_client:
+                # Proxy requests
+                await asyncio.wait(
+                    [
+                        self.sys_create_task(_websocket_forward(ws_server, ws_client)),
+                        self.sys_create_task(_websocket_forward(ws_client, ws_server)),
+                    ],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+        except TimeoutError:
+            _LOGGER.warning("WebSocket proxy to %s timed out", addon.slug)
 
         return ws_server
 
@@ -249,18 +253,28 @@ class APIIngress(CoreSysAttributes):
             skip_auto_headers={hdrs.CONTENT_TYPE},
         ) as result:
             headers = _response_header(result)
+
             # Avoid parsing content_type in simple cases for better performance
             if maybe_content_type := result.headers.get(hdrs.CONTENT_TYPE):
                 content_type = (maybe_content_type.partition(";"))[0].strip()
             else:
                 content_type = result.content_type
+
+            # Empty body responses (304, 204, HEAD, etc.) should not be streamed,
+            # otherwise aiohttp < 3.9.0 may generate an invalid "0\r\n\r\n" chunk
+            # This also avoids setting content_type for empty responses.
+            if must_be_empty_body(request.method, result.status):
+                # If upstream contains content-type, preserve it (e.g. for HEAD requests)
+                if maybe_content_type:
+                    headers[hdrs.CONTENT_TYPE] = content_type
+                return web.Response(
+                    headers=headers,
+                    status=result.status,
+                )
+
             # Simple request
             if (
-                # empty body responses should not be streamed,
-                # otherwise aiohttp < 3.9.0 may generate
-                # an invalid "0\r\n\r\n" chunk instead of an empty response.
-                must_be_empty_body(request.method, result.status)
-                or hdrs.CONTENT_LENGTH in result.headers
+                hdrs.CONTENT_LENGTH in result.headers
                 and int(result.headers.get(hdrs.CONTENT_LENGTH, 0)) < 4_194_000
             ):
                 # Return Response
@@ -286,6 +300,7 @@ class APIIngress(CoreSysAttributes):
                 aiohttp.ClientError,
                 aiohttp.ClientPayloadError,
                 ConnectionResetError,
+                ConnectionError,
             ) as err:
                 _LOGGER.error("Stream error with %s: %s", url, err)
 
@@ -309,9 +324,9 @@ class APIIngress(CoreSysAttributes):
 
 def _init_header(
     request: web.Request, addon: Addon, session_data: IngressSessionData | None
-) -> CIMultiDict | dict[str, str]:
+) -> CIMultiDict[str]:
     """Create initial header."""
-    headers = {}
+    headers = CIMultiDict[str]()
 
     if session_data is not None:
         headers[HEADER_REMOTE_USER_ID] = session_data.user.id
@@ -337,7 +352,7 @@ def _init_header(
             istr(HEADER_REMOTE_USER_DISPLAY_NAME),
         ):
             continue
-        headers[name] = value
+        headers.add(name, value)
 
     # Update X-Forwarded-For
     if request.transport:
@@ -348,9 +363,9 @@ def _init_header(
     return headers
 
 
-def _response_header(response: aiohttp.ClientResponse) -> dict[str, str]:
+def _response_header(response: aiohttp.ClientResponse) -> CIMultiDict[str]:
     """Create response header."""
-    headers = {}
+    headers = CIMultiDict[str]()
 
     for name, value in response.headers.items():
         if name in (
@@ -360,7 +375,7 @@ def _response_header(response: aiohttp.ClientResponse) -> dict[str, str]:
             hdrs.CONTENT_ENCODING,
         ):
             continue
-        headers[name] = value
+        headers.add(name, value)
 
     return headers
 
@@ -386,9 +401,9 @@ async def _websocket_forward(ws_from, ws_to):
             elif msg.type == aiohttp.WSMsgType.BINARY:
                 await ws_to.send_bytes(msg.data)
             elif msg.type == aiohttp.WSMsgType.PING:
-                await ws_to.ping()
+                await ws_to.ping(msg.data)
             elif msg.type == aiohttp.WSMsgType.PONG:
-                await ws_to.pong()
+                await ws_to.pong(msg.data)
             elif ws_to.closed:
                 await ws_to.close(code=ws_to.close_code, message=msg.extra)
     except RuntimeError:

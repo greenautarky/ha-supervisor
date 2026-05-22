@@ -1110,6 +1110,7 @@ def _make_backup_message_for_assert(
     reference: str,
     stage: str | None,
     done: bool = False,
+    progress: float = 0.0,
 ):
     """Make a backup message to use for assert test."""
     return {
@@ -1120,24 +1121,24 @@ def _make_backup_message_for_assert(
                 "name": f"backup_manager_{action}",
                 "reference": reference,
                 "uuid": ANY,
-                "progress": 0,
+                "progress": progress,
                 "stage": stage,
                 "done": done,
                 "parent_id": None,
                 "errors": [],
                 "created": ANY,
+                "extra": None,
             },
         },
     }
 
 
+@pytest.mark.usefixtures("tmp_supervisor_data", "path_extern")
 async def test_backup_progress(
     coresys: CoreSys,
     install_addon_ssh: Addon,
     container: MagicMock,
     ha_ws_client: AsyncMock,
-    tmp_supervisor_data,
-    path_extern,
 ):
     """Test progress is tracked during backups."""
     container.status = "running"
@@ -1181,7 +1182,10 @@ async def test_backup_progress(
             reference=full_backup.slug, stage="await_addon_restarts"
         ),
         _make_backup_message_for_assert(
-            reference=full_backup.slug, stage="await_addon_restarts", done=True
+            reference=full_backup.slug,
+            stage="await_addon_restarts",
+            done=True,
+            progress=100,
         ),
     ]
 
@@ -1226,18 +1230,17 @@ async def test_backup_progress(
             reference=partial_backup.slug,
             stage="finishing_file",
             done=True,
+            progress=100,
         ),
     ]
 
 
+@pytest.mark.usefixtures("supervisor_internet", "tmp_supervisor_data", "path_extern")
 async def test_restore_progress(
     coresys: CoreSys,
-    supervisor_internet,
     install_addon_ssh: Addon,
     container: MagicMock,
     ha_ws_client: AsyncMock,
-    tmp_supervisor_data,
-    path_extern,
 ):
     """Test progress is tracked during backups."""
     container.status = "running"
@@ -1319,6 +1322,7 @@ async def test_restore_progress(
             reference=full_backup.slug,
             stage="await_home_assistant_restart",
             done=True,
+            progress=100,
         ),
     ]
 
@@ -1357,6 +1361,7 @@ async def test_restore_progress(
             reference=folders_backup.slug,
             stage="folders",
             done=True,
+            progress=100,
         ),
     ]
 
@@ -1403,17 +1408,17 @@ async def test_restore_progress(
             reference=addon_backup.slug,
             stage="addons",
             done=True,
+            progress=100,
         ),
     ]
 
 
+@pytest.mark.usefixtures("tmp_supervisor_data", "path_extern")
 async def test_freeze_thaw(
     coresys: CoreSys,
     install_addon_ssh: Addon,
     container: MagicMock,
     ha_ws_client: AsyncMock,
-    tmp_supervisor_data,
-    path_extern,
 ):
     """Test manual freeze and thaw for external snapshots."""
     container.status = "running"
@@ -1459,7 +1464,11 @@ async def test_freeze_thaw(
                 action="thaw_all", reference=None, stage=None
             ),
             _make_backup_message_for_assert(
-                action="freeze_all", reference=None, stage="addons", done=True
+                action="freeze_all",
+                reference=None,
+                stage="addons",
+                done=True,
+                progress=100,
             ),
         ]
 
@@ -1487,7 +1496,11 @@ async def test_freeze_thaw(
                 action="thaw_all", reference=None, stage="addons"
             ),
             _make_backup_message_for_assert(
-                action="thaw_all", reference=None, stage="addons", done=True
+                action="thaw_all",
+                reference=None,
+                stage="addons",
+                done=True,
+                progress=100,
             ),
         ]
 
@@ -2244,3 +2257,33 @@ async def test_get_upload_path_for_mount_location(
     result = await manager.get_upload_path_for_location(mount)
 
     assert result == mount.local_where
+
+
+@pytest.mark.usefixtures(
+    "supervisor_internet", "tmp_supervisor_data", "path_extern", "install_addon_example"
+)
+async def test_backup_addon_skips_uninstalled(
+    coresys: CoreSys, caplog: pytest.LogCaptureFixture
+):
+    """Test restore installing new addon."""
+    await coresys.core.set_state(CoreState.RUNNING)
+    coresys.hardware.disk.get_disk_free_space = lambda x: 5000
+    assert "local_example" in coresys.addons.local
+    orig_store_addons = Backup.store_addons
+
+    async def mock_store_addons(*args, **kwargs):
+        # Mock an uninstall during the backup process
+        await coresys.addons.uninstall("local_example")
+        await orig_store_addons(*args, **kwargs)
+
+    with patch.object(Backup, "store_addons", new=mock_store_addons):
+        backup: Backup = await coresys.backups.do_backup_partial(
+            addons=["local_example"], folders=["ssl"]
+        )
+
+    assert "local_example" not in coresys.addons.local
+    assert not backup.addons
+    assert (
+        "Skipping backup of add-on local_example because it has been uninstalled"
+        in caplog.text
+    )

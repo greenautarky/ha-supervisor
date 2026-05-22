@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Interface, IPv6Address, IPv6Interface
+import logging
 import socket
 
 from ..dbus.const import (
@@ -11,6 +12,7 @@ from ..dbus.const import (
     InterfaceAddrGenMode as NMInterfaceAddrGenMode,
     InterfaceIp6Privacy as NMInterfaceIp6Privacy,
     InterfaceMethod as NMInterfaceMethod,
+    MulticastDnsValue,
 )
 from ..dbus.network.connection import NetworkConnection
 from ..dbus.network.interface import NetworkInterface
@@ -20,8 +22,18 @@ from .const import (
     InterfaceIp6Privacy,
     InterfaceMethod,
     InterfaceType,
+    MulticastDnsMode,
     WifiMode,
 )
+
+_LOGGER: logging.Logger = logging.getLogger(__name__)
+
+_MULTICAST_DNS_VALUE_MODE_MAPPING: dict[int, MulticastDnsMode] = {
+    MulticastDnsValue.DEFAULT.value: MulticastDnsMode.DEFAULT,
+    MulticastDnsValue.OFF.value: MulticastDnsMode.OFF,
+    MulticastDnsValue.RESOLVE.value: MulticastDnsMode.RESOLVE,
+    MulticastDnsValue.ANNOUNCE.value: MulticastDnsMode.ANNOUNCE,
+}
 
 
 @dataclass(slots=True)
@@ -79,7 +91,12 @@ class VlanConfig:
     """Represent a vlan configuration."""
 
     id: int
-    interface: str
+    # Note: On VLAN creation, parent is the interface name, but in the NetworkManager
+    # config the parent is set to the connection UUID in get_connection_from_interface().
+    # On network update (which we call in apply_changes() on VLAN creation), the
+    # parent is then set to that connection UUID in _map_nm_vlan(), hence we always
+    # operate with a connection UUID as interface!
+    interface: str | None
 
 
 @dataclass(slots=True)
@@ -99,16 +116,40 @@ class Interface:
     ipv6setting: Ip6Setting | None
     wifi: WifiConfig | None
     vlan: VlanConfig | None
+    mdns: MulticastDnsMode | None
+    llmnr: MulticastDnsMode | None
 
     def equals_dbus_interface(self, inet: NetworkInterface) -> bool:
         """Return true if this represents the dbus interface."""
         if not inet.settings:
             return False
 
+        # Special handling for VLAN interfaces
+        if self.type == InterfaceType.VLAN and inet.type == DeviceType.VLAN:
+            if not self.vlan:
+                raise RuntimeError("VLAN information missing")
+
+            if inet.settings.vlan:
+                # For VLANs, compare by VLAN id and parent interface
+                return (
+                    inet.settings.vlan.id == self.vlan.id
+                    and inet.settings.vlan.parent == self.vlan.interface
+                )
+            return False
+
+        if (self.type, inet.type) not in [
+            (InterfaceType.ETHERNET, DeviceType.ETHERNET),
+            (InterfaceType.WIRELESS, DeviceType.WIRELESS),
+        ]:
+            return False
+
         if inet.settings.match and inet.settings.match.path:
             return inet.settings.match.path == [self.path]
 
-        return inet.settings.connection.interface_name == self.name
+        return (
+            inet.settings.connection is not None
+            and inet.settings.connection.interface_name == self.name
+        )
 
     @staticmethod
     def from_dbus_interface(inet: NetworkInterface) -> "Interface":
@@ -160,23 +201,30 @@ class Interface:
             ipv6_setting = Ip6Setting(InterfaceMethod.DISABLED, [], None, [])
 
         ipv4_ready = (
-            bool(inet.connection)
+            inet.connection is not None
             and ConnectionStateFlags.IP4_READY in inet.connection.state_flags
         )
         ipv6_ready = (
-            bool(inet.connection)
+            inet.connection is not None
             and ConnectionStateFlags.IP6_READY in inet.connection.state_flags
         )
 
+        if inet.settings and inet.settings.connection:
+            mdns = inet.settings.connection.mdns
+            llmnr = inet.settings.connection.llmnr
+        else:
+            mdns = None
+            llmnr = None
+
         return Interface(
-            inet.name,
-            inet.hw_address,
-            inet.path,
-            inet.settings is not None,
-            Interface._map_nm_connected(inet.connection),
-            inet.primary,
-            Interface._map_nm_type(inet.type),
-            IpConfig(
+            name=inet.interface_name,
+            mac=inet.hw_address,
+            path=inet.path,
+            enabled=inet.settings is not None,
+            connected=Interface._map_nm_connected(inet.connection),
+            primary=inet.primary,
+            type=Interface._map_nm_type(inet.type),
+            ipv4=IpConfig(
                 address=inet.connection.ipv4.address
                 if inet.connection.ipv4.address
                 else [],
@@ -188,8 +236,8 @@ class Interface:
             )
             if inet.connection and inet.connection.ipv4
             else IpConfig([], None, [], ipv4_ready),
-            ipv4_setting,
-            IpConfig(
+            ipv4setting=ipv4_setting,
+            ipv6=IpConfig(
                 address=inet.connection.ipv6.address
                 if inet.connection.ipv6.address
                 else [],
@@ -201,30 +249,30 @@ class Interface:
             )
             if inet.connection and inet.connection.ipv6
             else IpConfig([], None, [], ipv6_ready),
-            ipv6_setting,
-            Interface._map_nm_wifi(inet),
-            Interface._map_nm_vlan(inet),
+            ipv6setting=ipv6_setting,
+            wifi=Interface._map_nm_wifi(inet),
+            vlan=Interface._map_nm_vlan(inet),
+            mdns=Interface._map_nm_multicast_dns(mdns),
+            llmnr=Interface._map_nm_multicast_dns(llmnr),
         )
 
     @staticmethod
-    def _map_nm_method(method: str) -> InterfaceMethod:
+    def _map_nm_method(method: str | None) -> InterfaceMethod:
         """Map IP interface method."""
-        mapping = {
-            NMInterfaceMethod.AUTO: InterfaceMethod.AUTO,
-            NMInterfaceMethod.DISABLED: InterfaceMethod.DISABLED,
-            NMInterfaceMethod.MANUAL: InterfaceMethod.STATIC,
-            NMInterfaceMethod.LINK_LOCAL: InterfaceMethod.DISABLED,
-        }
-
-        return mapping.get(method, InterfaceMethod.DISABLED)
+        match method:
+            case NMInterfaceMethod.AUTO.value:
+                return InterfaceMethod.AUTO
+            case NMInterfaceMethod.MANUAL:
+                return InterfaceMethod.STATIC
+        return InterfaceMethod.DISABLED
 
     @staticmethod
     def _map_nm_addr_gen_mode(addr_gen_mode: int) -> InterfaceAddrGenMode:
         """Map IPv6 interface addr_gen_mode."""
         mapping = {
-            NMInterfaceAddrGenMode.EUI64: InterfaceAddrGenMode.EUI64,
-            NMInterfaceAddrGenMode.STABLE_PRIVACY: InterfaceAddrGenMode.STABLE_PRIVACY,
-            NMInterfaceAddrGenMode.DEFAULT_OR_EUI64: InterfaceAddrGenMode.DEFAULT_OR_EUI64,
+            NMInterfaceAddrGenMode.EUI64.value: InterfaceAddrGenMode.EUI64,
+            NMInterfaceAddrGenMode.STABLE_PRIVACY.value: InterfaceAddrGenMode.STABLE_PRIVACY,
+            NMInterfaceAddrGenMode.DEFAULT_OR_EUI64.value: InterfaceAddrGenMode.DEFAULT_OR_EUI64,
         }
 
         return mapping.get(addr_gen_mode, InterfaceAddrGenMode.DEFAULT)
@@ -233,9 +281,9 @@ class Interface:
     def _map_nm_ip6_privacy(ip6_privacy: int) -> InterfaceIp6Privacy:
         """Map IPv6 interface ip6_privacy."""
         mapping = {
-            NMInterfaceIp6Privacy.DISABLED: InterfaceIp6Privacy.DISABLED,
-            NMInterfaceIp6Privacy.ENABLED_PREFER_PUBLIC: InterfaceIp6Privacy.ENABLED_PREFER_PUBLIC,
-            NMInterfaceIp6Privacy.ENABLED: InterfaceIp6Privacy.ENABLED,
+            NMInterfaceIp6Privacy.DISABLED.value: InterfaceIp6Privacy.DISABLED,
+            NMInterfaceIp6Privacy.ENABLED_PREFER_PUBLIC.value: InterfaceIp6Privacy.ENABLED_PREFER_PUBLIC,
+            NMInterfaceIp6Privacy.ENABLED.value: InterfaceIp6Privacy.ENABLED,
         }
 
         return mapping.get(ip6_privacy, InterfaceIp6Privacy.DEFAULT)
@@ -253,12 +301,14 @@ class Interface:
 
     @staticmethod
     def _map_nm_type(device_type: int) -> InterfaceType:
-        mapping = {
-            DeviceType.ETHERNET: InterfaceType.ETHERNET,
-            DeviceType.WIRELESS: InterfaceType.WIRELESS,
-            DeviceType.VLAN: InterfaceType.VLAN,
-        }
-        return mapping[device_type]
+        match device_type:
+            case DeviceType.ETHERNET.value:
+                return InterfaceType.ETHERNET
+            case DeviceType.WIRELESS.value:
+                return InterfaceType.WIRELESS
+            case DeviceType.VLAN.value:
+                return InterfaceType.VLAN
+        raise ValueError(f"Invalid device type: {device_type}")
 
     @staticmethod
     def _map_nm_wifi(inet: NetworkInterface) -> WifiConfig | None:
@@ -267,15 +317,22 @@ class Interface:
             return None
 
         # Authentication and PSK
-        auth = None
+        auth = AuthMethod.OPEN
         psk = None
-        if not inet.settings.wireless_security:
-            auth = AuthMethod.OPEN
-        elif inet.settings.wireless_security.key_mgmt == "none":
-            auth = AuthMethod.WEP
-        elif inet.settings.wireless_security.key_mgmt == "wpa-psk":
-            auth = AuthMethod.WPA_PSK
-            psk = inet.settings.wireless_security.psk
+        if inet.settings.wireless_security:
+            match inet.settings.wireless_security.key_mgmt:
+                case "none":
+                    auth = AuthMethod.WEP
+                case "wpa-psk":
+                    auth = AuthMethod.WPA_PSK
+                    psk = inet.settings.wireless_security.psk
+                case _:
+                    _LOGGER.warning(
+                        "Auth method %s for network interface %s unsupported, skipping",
+                        inet.settings.wireless_security.key_mgmt,
+                        inet.interface_name,
+                    )
+                    return None
 
         # WifiMode
         mode = WifiMode.INFRASTRUCTURE
@@ -289,17 +346,24 @@ class Interface:
             signal = None
 
         return WifiConfig(
-            mode,
-            inet.settings.wireless.ssid,
-            auth,
-            psk,
-            signal,
+            mode=mode,
+            ssid=inet.settings.wireless.ssid if inet.settings.wireless else "",
+            auth=auth,
+            psk=psk,
+            signal=signal,
         )
 
     @staticmethod
-    def _map_nm_vlan(inet: NetworkInterface) -> WifiConfig | None:
+    def _map_nm_vlan(inet: NetworkInterface) -> VlanConfig | None:
         """Create mapping to nm vlan property."""
-        if inet.type != DeviceType.VLAN or not inet.settings:
+        if inet.type != DeviceType.VLAN or not inet.settings or not inet.settings.vlan:
             return None
 
         return VlanConfig(inet.settings.vlan.id, inet.settings.vlan.parent)
+
+    @staticmethod
+    def _map_nm_multicast_dns(mode: int | None) -> MulticastDnsMode | None:
+        if mode is None:
+            return None
+
+        return _MULTICAST_DNS_VALUE_MODE_MAPPING.get(mode)

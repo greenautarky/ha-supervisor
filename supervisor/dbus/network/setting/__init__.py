@@ -6,15 +6,15 @@ from typing import Any
 from dbus_fast import Variant
 from dbus_fast.aio.message_bus import MessageBus
 
-from ...const import DBUS_NAME_NM
+from ...const import DBUS_NAME_NM, MulticastDnsValue
 from ...interface import DBusInterface
 from ...utils import dbus_connected
 from ..configuration import (
     ConnectionProperties,
     EthernetProperties,
+    Ip4Properties,
     Ip6Properties,
     IpAddress,
-    IpProperties,
     MatchProperties,
     VlanProperties,
     WirelessProperties,
@@ -115,7 +115,7 @@ class NetworkSetting(DBusInterface):
         self._wireless_security: WirelessSecurityProperties | None = None
         self._ethernet: EthernetProperties | None = None
         self._vlan: VlanProperties | None = None
-        self._ipv4: IpProperties | None = None
+        self._ipv4: Ip4Properties | None = None
         self._ipv6: Ip6Properties | None = None
         self._match: MatchProperties | None = None
         super().__init__()
@@ -151,13 +151,13 @@ class NetworkSetting(DBusInterface):
         return self._vlan
 
     @property
-    def ipv4(self) -> IpProperties | None:
-        """Return ipv4 properties if any."""
+    def ipv4(self) -> Ip4Properties | None:
+        """Return IPv4 properties if any."""
         return self._ipv4
 
     @property
     def ipv6(self) -> Ip6Properties | None:
-        """Return ipv6 properties if any."""
+        """Return IPv6 properties if any."""
         return self._ipv6
 
     @property
@@ -225,7 +225,7 @@ class NetworkSetting(DBusInterface):
         data = await self.get_settings()
 
         # Get configuration settings we care about
-        # See: https://developer-old.gnome.org/NetworkManager/stable/ch01.html
+        # See: https://networkmanager.dev/docs/api/latest/nm-settings-dbus.html
         if CONF_ATTR_CONNECTION in data:
             self._connection = ConnectionProperties(
                 id=data[CONF_ATTR_CONNECTION].get(CONF_ATTR_CONNECTION_ID),
@@ -233,6 +233,12 @@ class NetworkSetting(DBusInterface):
                 type=data[CONF_ATTR_CONNECTION].get(CONF_ATTR_CONNECTION_TYPE),
                 interface_name=data[CONF_ATTR_CONNECTION].get(
                     CONF_ATTR_CONNECTION_INTERFACE_NAME
+                ),
+                mdns=data[CONF_ATTR_CONNECTION].get(
+                    CONF_ATTR_CONNECTION_MDNS, MulticastDnsValue.DEFAULT.value
+                ),
+                llmnr=data[CONF_ATTR_CONNECTION].get(
+                    CONF_ATTR_CONNECTION_LLMNR, MulticastDnsValue.DEFAULT.value
                 ),
             )
 
@@ -271,16 +277,23 @@ class NetworkSetting(DBusInterface):
             )
 
         if CONF_ATTR_VLAN in data:
-            self._vlan = VlanProperties(
-                id=data[CONF_ATTR_VLAN].get(CONF_ATTR_VLAN_ID),
-                parent=data[CONF_ATTR_VLAN].get(CONF_ATTR_VLAN_PARENT),
-            )
+            if CONF_ATTR_VLAN_ID in data[CONF_ATTR_VLAN]:
+                self._vlan = VlanProperties(
+                    id=data[CONF_ATTR_VLAN][CONF_ATTR_VLAN_ID],
+                    parent=data[CONF_ATTR_VLAN].get(CONF_ATTR_VLAN_PARENT),
+                )
+            else:
+                self._vlan = None
+                _LOGGER.warning(
+                    "Network settings for vlan connection %s missing required vlan id, cannot process it",
+                    self.connection.interface_name,
+                )
 
         if CONF_ATTR_IPV4 in data:
             address_data = None
             if ips := data[CONF_ATTR_IPV4].get(CONF_ATTR_IPV4_ADDRESS_DATA):
                 address_data = [IpAddress(ip["address"], ip["prefix"]) for ip in ips]
-            self._ipv4 = IpProperties(
+            self._ipv4 = Ip4Properties(
                 method=data[CONF_ATTR_IPV4].get(CONF_ATTR_IPV4_METHOD),
                 address_data=address_data,
                 gateway=data[CONF_ATTR_IPV4].get(CONF_ATTR_IPV4_GATEWAY),

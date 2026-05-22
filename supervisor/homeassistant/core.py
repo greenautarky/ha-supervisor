@@ -28,7 +28,8 @@ from ..exceptions import (
     HomeAssistantUpdateError,
     JobException,
 )
-from ..jobs.const import JOB_GROUP_HOME_ASSISTANT_CORE, JobExecutionLimit
+from ..jobs import ChildJobSyncFilter
+from ..jobs.const import JOB_GROUP_HOME_ASSISTANT_CORE, JobConcurrency, JobThrottle
 from ..jobs.decorator import Job, JobCondition
 from ..jobs.job_group import JobGroup
 from ..resolution.const import ContextType, IssueType
@@ -87,19 +88,19 @@ class HomeAssistantCore(JobGroup):
 
         try:
             # Evaluate Version if we lost this information
-            if not self.sys_homeassistant.version:
+            if self.sys_homeassistant.version:
+                version = self.sys_homeassistant.version
+            else:
                 self.sys_homeassistant.version = (
-                    await self.instance.get_latest_version()
-                )
+                    version
+                ) = await self.instance.get_latest_version()
 
-            await self.instance.attach(
-                version=self.sys_homeassistant.version, skip_state_event_if_down=True
-            )
+            await self.instance.attach(version=version, skip_state_event_if_down=True)
 
             # Ensure we are using correct image for this system (unless user has overridden it)
             if not self.sys_homeassistant.override_image:
                 await self.instance.check_image(
-                    self.sys_homeassistant.version, self.sys_homeassistant.default_image
+                    version, self.sys_homeassistant.default_image
                 )
                 self.sys_homeassistant.set_image(self.sys_homeassistant.default_image)
         except DockerError:
@@ -108,7 +109,7 @@ class HomeAssistantCore(JobGroup):
             )
             await self.install_landingpage()
         else:
-            self.sys_homeassistant.version = self.instance.version
+            self.sys_homeassistant.version = self.instance.version or version
             self.sys_homeassistant.set_image(self.instance.image)
             await self.sys_homeassistant.save_data()
 
@@ -123,8 +124,8 @@ class HomeAssistantCore(JobGroup):
 
     @Job(
         name="home_assistant_core_install_landing_page",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def install_landingpage(self) -> None:
         """Install a landing page."""
@@ -171,8 +172,8 @@ class HomeAssistantCore(JobGroup):
 
     @Job(
         name="home_assistant_core_install",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def install(self) -> None:
         """Install a landing page."""
@@ -182,12 +183,13 @@ class HomeAssistantCore(JobGroup):
             if not self.sys_homeassistant.latest_version:
                 await self.sys_updater.reload()
 
-            if self.sys_homeassistant.latest_version:
+            if to_version := self.sys_homeassistant.latest_version:
                 try:
                     await self.instance.update(
-                        self.sys_homeassistant.latest_version,
+                        to_version,
                         image=self.sys_updater.image_homeassistant,
                     )
+                    self.sys_homeassistant.version = self.instance.version or to_version
                     break
                 except (DockerError, JobException):
                     pass
@@ -198,7 +200,6 @@ class HomeAssistantCore(JobGroup):
             await asyncio.sleep(30)
 
         _LOGGER.info("Home Assistant docker now installed")
-        self.sys_homeassistant.version = self.instance.version
         self.sys_homeassistant.set_image(self.sys_updater.image_homeassistant)
         await self.sys_homeassistant.save_data()
 
@@ -222,17 +223,25 @@ class HomeAssistantCore(JobGroup):
             JobCondition.PLUGINS_UPDATED,
             JobCondition.SUPERVISOR_UPDATED,
         ],
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
+        # We assume for now the docker image pull is 100% of this task. But from
+        # a user perspective that isn't true. Other steps that take time which
+        # is not accounted for in progress include: partial backup, image
+        # cleanup, and Home Assistant restart
+        child_job_syncs=[
+            ChildJobSyncFilter("docker_interface_install", progress_allocation=1.0)
+        ],
     )
     async def update(
         self,
         version: AwesomeVersion | None = None,
         backup: bool | None = False,
+        validation_complete: asyncio.Event | None = None,
     ) -> None:
         """Update HomeAssistant version."""
-        version = version or self.sys_homeassistant.latest_version
-        if not version:
+        to_version = version or self.sys_homeassistant.latest_version
+        if not to_version:
             raise HomeAssistantUpdateError(
                 "Cannot determine latest version of Home Assistant for update",
                 _LOGGER.error,
@@ -243,10 +252,14 @@ class HomeAssistantCore(JobGroup):
         running = await self.instance.is_running()
         exists = await self.instance.exists()
 
-        if exists and version == self.instance.version:
+        if exists and to_version == self.instance.version:
             raise HomeAssistantUpdateError(
-                f"Version {version!s} is already installed", _LOGGER.warning
+                f"Version {to_version!s} is already installed", _LOGGER.warning
             )
+
+        # If being run in the background, notify caller that validation has completed
+        if validation_complete:
+            validation_complete.set()
 
         if backup:
             await self.sys_backups.do_backup_partial(
@@ -268,7 +281,7 @@ class HomeAssistantCore(JobGroup):
                     "Updating Home Assistant image failed", _LOGGER.warning
                 ) from err
 
-            self.sys_homeassistant.version = self.instance.version
+            self.sys_homeassistant.version = self.instance.version or to_version
             self.sys_homeassistant.set_image(self.sys_updater.image_homeassistant)
 
             if running:
@@ -282,7 +295,7 @@ class HomeAssistantCore(JobGroup):
 
         # Update Home Assistant
         with suppress(HomeAssistantError):
-            await _update(version)
+            await _update(to_version)
 
         if not self.error_state and rollback:
             try:
@@ -324,8 +337,8 @@ class HomeAssistantCore(JobGroup):
 
     @Job(
         name="home_assistant_core_start",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def start(self) -> None:
         """Run Home Assistant docker."""
@@ -359,8 +372,8 @@ class HomeAssistantCore(JobGroup):
 
     @Job(
         name="home_assistant_core_stop",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def stop(self, *, remove_container: bool = False) -> None:
         """Stop Home Assistant Docker."""
@@ -371,8 +384,8 @@ class HomeAssistantCore(JobGroup):
 
     @Job(
         name="home_assistant_core_restart",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def restart(self, *, safe_mode: bool = False) -> None:
         """Restart Home Assistant Docker."""
@@ -392,8 +405,8 @@ class HomeAssistantCore(JobGroup):
 
     @Job(
         name="home_assistant_core_rebuild",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def rebuild(self, *, safe_mode: bool = False) -> None:
         """Rebuild Home Assistant Docker container."""
@@ -414,13 +427,6 @@ class HomeAssistantCore(JobGroup):
         Return a coroutine.
         """
         return self.instance.logs()
-
-    def check_trust(self) -> Awaitable[None]:
-        """Calculate HomeAssistant docker content trust.
-
-        Return Coroutine.
-        """
-        return self.instance.check_trust()
 
     async def stats(self) -> DockerStats:
         """Return stats of Home Assistant."""
@@ -546,9 +552,9 @@ class HomeAssistantCore(JobGroup):
 
     @Job(
         name="home_assistant_core_restart_after_problem",
-        limit=JobExecutionLimit.THROTTLE_RATE_LIMIT,
         throttle_period=WATCHDOG_THROTTLE_PERIOD,
         throttle_max_calls=WATCHDOG_THROTTLE_MAX_CALLS,
+        throttle=JobThrottle.RATE_LIMIT,
     )
     async def _restart_after_problem(self, state: ContainerState):
         """Restart unhealthy or failed Home Assistant."""

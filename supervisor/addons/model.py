@@ -72,6 +72,7 @@ from ..const import (
     ATTR_TYPE,
     ATTR_UART,
     ATTR_UDEV,
+    ATTR_ULIMITS,
     ATTR_URL,
     ATTR_USB,
     ATTR_VERSION,
@@ -89,7 +90,12 @@ from ..const import (
 )
 from ..coresys import CoreSys
 from ..docker.const import Capabilities
-from ..exceptions import AddonsNotSupportedError
+from ..exceptions import (
+    AddonNotSupportedArchitectureError,
+    AddonNotSupportedError,
+    AddonNotSupportedHomeAssistantVersionError,
+    AddonNotSupportedMachineTypeError,
+)
 from ..jobs.const import JOB_GROUP_ADDON
 from ..jobs.job_group import JobGroup
 from ..utils import version_is_new_enough
@@ -97,7 +103,6 @@ from .configuration import FolderMapping
 from .const import (
     ATTR_BACKUP,
     ATTR_BREAKING_VERSIONS,
-    ATTR_CODENOTARY,
     ATTR_PATH,
     ATTR_READ_ONLY,
     AddonBackupMode,
@@ -458,6 +463,11 @@ class AddonModel(JobGroup, ABC):
         return self.data[ATTR_UDEV]
 
     @property
+    def ulimits(self) -> dict[str, Any]:
+        """Return ulimits configuration."""
+        return self.data[ATTR_ULIMITS]
+
+    @property
     def with_kernel_modules(self) -> bool:
         """Return True if the add-on access to kernel modules."""
         return self.data[ATTR_KERNEL_MODULES]
@@ -621,13 +631,8 @@ class AddonModel(JobGroup, ABC):
 
     @property
     def signed(self) -> bool:
-        """Return True if the image is signed."""
-        return ATTR_CODENOTARY in self.data
-
-    @property
-    def codenotary(self) -> str | None:
-        """Return Signer email address for CAS."""
-        return self.data.get(ATTR_CODENOTARY)
+        """Currently no signing support."""
+        return False
 
     @property
     def breaking_versions(self) -> list[AwesomeVersion]:
@@ -645,7 +650,7 @@ class AddonModel(JobGroup, ABC):
                 return None
 
             # Return data
-            return readme.read_text(encoding="utf-8")
+            return readme.read_text(encoding="utf-8", errors="replace")
 
         return await self.sys_run_in_executor(read_readme)
 
@@ -664,11 +669,15 @@ class AddonModel(JobGroup, ABC):
         """Validate if addon is available for current system."""
         return self._validate_availability(self.data, logger=_LOGGER.error)
 
-    def __eq__(self, other):
-        """Compaired add-on objects."""
+    def __eq__(self, other: Any) -> bool:
+        """Compare add-on objects."""
         if not isinstance(other, AddonModel):
             return False
         return self.slug == other.slug
+
+    def __hash__(self) -> int:
+        """Hash for add-on objects."""
+        return hash(self.slug)
 
     def _validate_availability(
         self, config, *, logger: Callable[..., None] | None = None
@@ -676,9 +685,8 @@ class AddonModel(JobGroup, ABC):
         """Validate if addon is available for current system."""
         # Architecture
         if not self.sys_arch.is_supported(config[ATTR_ARCH]):
-            raise AddonsNotSupportedError(
-                f"Add-on {self.slug} not supported on this platform, supported architectures: {', '.join(config[ATTR_ARCH])}",
-                logger,
+            raise AddonNotSupportedArchitectureError(
+                logger, slug=self.slug, architectures=config[ATTR_ARCH]
             )
 
         # Machine / Hardware
@@ -686,9 +694,8 @@ class AddonModel(JobGroup, ABC):
         if machine and (
             f"!{self.sys_machine}" in machine or self.sys_machine not in machine
         ):
-            raise AddonsNotSupportedError(
-                f"Add-on {self.slug} not supported on this machine, supported machine types: {', '.join(machine)}",
-                logger,
+            raise AddonNotSupportedMachineTypeError(
+                logger, slug=self.slug, machine_types=machine
             )
 
         # Home Assistant
@@ -697,16 +704,15 @@ class AddonModel(JobGroup, ABC):
             if version and not version_is_new_enough(
                 self.sys_homeassistant.version, version
             ):
-                raise AddonsNotSupportedError(
-                    f"Add-on {self.slug} not supported on this system, requires Home Assistant version {version} or greater",
-                    logger,
+                raise AddonNotSupportedHomeAssistantVersionError(
+                    logger, slug=self.slug, version=str(version)
                 )
 
     def _available(self, config) -> bool:
         """Return True if this add-on is available on this platform."""
         try:
             self._validate_availability(config)
-        except AddonsNotSupportedError:
+        except AddonNotSupportedError:
             return False
 
         return True

@@ -1,15 +1,18 @@
 """Supervisor job manager."""
 
+from __future__ import annotations
+
 import asyncio
-from collections.abc import Awaitable, Callable
-from contextlib import contextmanager
+from collections.abc import Callable, Coroutine, Generator
+from contextlib import contextmanager, suppress
 from contextvars import Context, ContextVar, Token
 from dataclasses import dataclass
 from datetime import datetime
 import logging
-from typing import Any
+from typing import Any, Self
 from uuid import uuid4
 
+from attr.validators import gt, lt
 from attrs import Attribute, define, field
 from attrs.setters import convert as attr_convert, frozen, validate as attr_validate
 from attrs.validators import ge, le
@@ -20,6 +23,7 @@ from ..exceptions import HassioError, JobNotFound, JobStartException
 from ..homeassistant.const import WSEvent
 from ..utils.common import FileConfiguration
 from ..utils.dt import utcnow
+from ..utils.sentinel import DEFAULT
 from .const import ATTR_IGNORE_CONDITIONS, FILE_CONFIG_JOBS, JobCondition
 from .validate import SCHEMA_JOBS_CONFIG
 
@@ -27,7 +31,7 @@ from .validate import SCHEMA_JOBS_CONFIG
 # When a new asyncio task is started the current context is copied over.
 # Modifications to it in one task are not visible to others though.
 # This allows us to track what job is currently in progress in each task.
-_CURRENT_JOB: ContextVar[str] = ContextVar("current_job")
+_CURRENT_JOB: ContextVar[str | None] = ContextVar("current_job", default=None)
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -46,13 +50,13 @@ def _remove_current_job(context: Context) -> Context:
     return context
 
 
-def _invalid_if_done(instance: "SupervisorJob", *_) -> None:
+def _invalid_if_done(instance: SupervisorJob, *_) -> None:
     """Validate that job is not done."""
     if instance.done:
         raise ValueError("Cannot update a job that is done")
 
 
-def _on_change(instance: "SupervisorJob", attribute: Attribute, value: Any) -> Any:
+def _on_change(instance: SupervisorJob, attribute: Attribute, value: Any) -> Any:
     """Forward a change to a field on to the listener if defined."""
     value = attr_convert(instance, attribute, value)
     value = attr_validate(instance, attribute, value)
@@ -61,10 +65,32 @@ def _on_change(instance: "SupervisorJob", attribute: Attribute, value: Any) -> A
     return value
 
 
-def _invalid_if_started(instance: "SupervisorJob", *_) -> None:
+def _invalid_if_started(instance: SupervisorJob, *_) -> None:
     """Validate that job has not been started."""
     if instance.done is not None:
         raise ValueError("Field cannot be updated once job has started")
+
+
+@define(frozen=True)
+class ChildJobSyncFilter:
+    """Filter to identify a child job to sync progress from."""
+
+    name: str
+    reference: str | None | type[DEFAULT] = DEFAULT
+    progress_allocation: float = field(default=1.0, validator=[gt(0.0), le(1.0)])
+
+    def matches(self, job: SupervisorJob) -> bool:
+        """Return true if job matches filter."""
+        return job.name == self.name and self.reference in (DEFAULT, job.reference)
+
+
+@define(frozen=True)
+class ParentJobSync:
+    """Parent job sync details."""
+
+    uuid: str
+    starting_progress: float = field(validator=[ge(0.0), lt(100.0)])
+    progress_allocation: float = field(validator=[gt(0.0), le(1.0)])
 
 
 @define
@@ -72,10 +98,12 @@ class SupervisorJobError:
     """Representation of an error occurring during a supervisor job."""
 
     type_: type[HassioError] = HassioError
-    message: str = "Unknown error, see supervisor logs"
+    message: str = (
+        "Unknown error, see Supervisor logs (check with 'ha supervisor logs')"
+    )
     stage: str | None = None
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, str | None]:
         """Return dictionary representation."""
         return {
             "type": self.type_.__name__,
@@ -96,23 +124,21 @@ class SupervisorJob:
         default=0,
         validator=[ge(0), le(100), _invalid_if_done],
         on_setattr=_on_change,
-        converter=lambda val: round(val, 1),
     )
     stage: str | None = field(
         default=None, validator=[_invalid_if_done], on_setattr=_on_change
     )
-    parent_id: str | None = field(
-        factory=lambda: _CURRENT_JOB.get(None), on_setattr=frozen
-    )
+    parent_id: str | None = field(factory=_CURRENT_JOB.get, on_setattr=frozen)
     done: bool | None = field(init=False, default=None, on_setattr=_on_change)
-    on_change: Callable[["SupervisorJob", Attribute, Any], None] | None = field(
-        default=None, on_setattr=frozen
-    )
+    on_change: Callable[[SupervisorJob, Attribute, Any], None] | None = None
     internal: bool = field(default=False)
     errors: list[SupervisorJobError] = field(
         init=False, factory=list, on_setattr=_on_change
     )
     release_event: asyncio.Event | None = None
+    extra: dict[str, Any] | None = None
+    child_job_syncs: list[ChildJobSyncFilter] | None = None
+    parent_job_syncs: list[ParentJobSync] = field(init=False, factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Return dictionary representation."""
@@ -120,12 +146,13 @@ class SupervisorJob:
             "name": self.name,
             "reference": self.reference,
             "uuid": self.uuid,
-            "progress": self.progress,
+            "progress": round(self.progress, 1),
             "stage": self.stage,
             "done": self.done,
             "parent_id": self.parent_id,
             "errors": [err.as_dict() for err in self.errors],
             "created": self.created.isoformat(),
+            "extra": self.extra,
         }
 
     def capture_error(self, err: HassioError | None = None) -> None:
@@ -137,7 +164,7 @@ class SupervisorJob:
         self.errors += [new_error]
 
     @contextmanager
-    def start(self):
+    def start(self) -> Generator[Self]:
         """Start the job in the current task.
 
         This can only be called if the parent ID matches the job running in the current task.
@@ -146,18 +173,50 @@ class SupervisorJob:
         """
         if self.done is not None:
             raise JobStartException("Job has already been started")
-        if _CURRENT_JOB.get(None) != self.parent_id:
+        if _CURRENT_JOB.get() != self.parent_id:
             raise JobStartException("Job has a different parent from current job")
 
         self.done = False
-        token: Token[str] | None = None
+        token: Token[str | None] | None = None
         try:
             token = _CURRENT_JOB.set(self.uuid)
             yield self
+        # Cannot have an else without an except so we do nothing and re-raise
+        except:  # noqa: TRY203
+            raise
+        else:
+            self.update(progress=100, done=True)
         finally:
-            self.done = True
+            if not self.done:
+                self.done = True
             if token:
                 _CURRENT_JOB.reset(token)
+
+    def update(
+        self,
+        progress: float | None = None,
+        stage: str | None = None,
+        extra: dict[str, Any] | None = DEFAULT,  # type: ignore
+        done: bool | None = None,
+    ) -> None:
+        """Update multiple fields with one on change event."""
+        on_change = self.on_change
+        self.on_change = None
+
+        if progress is not None:
+            self.progress = progress
+        if stage is not None:
+            self.stage = stage
+        if extra != DEFAULT:
+            self.extra = extra
+
+        # Done has special event. use that to trigger on change if included
+        # If not then just use any other field to trigger
+        self.on_change = on_change
+        if done is not None:
+            self.done = done
+        else:
+            self.reference = self.reference
 
 
 class JobManager(FileConfiguration, CoreSysAttributes):
@@ -193,28 +252,47 @@ class JobManager(FileConfiguration, CoreSysAttributes):
 
         Must be called from within a job. Raises RuntimeError if there is no current job.
         """
-        try:
-            return self.get_job(_CURRENT_JOB.get())
-        except (LookupError, JobNotFound):
-            raise RuntimeError(
-                "No job for the current asyncio task!", _LOGGER.critical
-            ) from None
+        if job_id := _CURRENT_JOB.get():
+            with suppress(JobNotFound):
+                return self.get_job(job_id)
+        raise RuntimeError("No job for the current asyncio task!", _LOGGER.critical)
 
     @property
     def is_job(self) -> bool:
         """Return true if there is an active job for the current asyncio task."""
-        return bool(_CURRENT_JOB.get(None))
+        return _CURRENT_JOB.get() is not None
 
-    def _notify_on_job_change(
+    def _on_job_change(
         self, job: SupervisorJob, attribute: Attribute, value: Any
     ) -> None:
-        """Notify Home Assistant of a change to a job and bus on job start/end."""
+        """Take on change actions such as notify home assistant and sync progress."""
+        # Job object will be before the change. Combine the change with current data
         if attribute.name == "errors":
             value = [err.as_dict() for err in value]
+        job_data = job.as_dict() | {attribute.name: value}
 
-        self.sys_homeassistant.websocket.supervisor_event(
-            WSEvent.JOB, job.as_dict() | {attribute.name: value}
-        )
+        # Notify Home Assistant of change if its not internal
+        if not job.internal:
+            self.sys_homeassistant.websocket.supervisor_event(WSEvent.JOB, job_data)
+
+        # If we have any parent job syncs, sync progress to them
+        for sync in job.parent_job_syncs:
+            try:
+                parent_job = self.get_job(sync.uuid)
+            except JobNotFound:
+                # Shouldn't happen but failure to find a parent for progress
+                # reporting shouldn't raise and break the active job
+                continue
+
+            progress = min(
+                100,
+                sync.starting_progress
+                + (sync.progress_allocation * job_data["progress"]),
+            )
+            # Using max would always trigger on change even if progress was unchanged
+            # pylint: disable-next=R1731
+            if parent_job.progress < progress:  # noqa: PLR1730
+                parent_job.progress = progress
 
         if attribute.name == "done":
             if value is False:
@@ -228,17 +306,53 @@ class JobManager(FileConfiguration, CoreSysAttributes):
         reference: str | None = None,
         initial_stage: str | None = None,
         internal: bool = False,
-        no_parent: bool = False,
+        parent_id: str | None = DEFAULT,  # type: ignore
+        child_job_syncs: list[ChildJobSyncFilter] | None = None,
     ) -> SupervisorJob:
         """Create a new job."""
         job = SupervisorJob(
             name,
             reference=reference,
             stage=initial_stage,
-            on_change=None if internal else self._notify_on_job_change,
+            on_change=self._on_job_change,
             internal=internal,
-            **({"parent_id": None} if no_parent else {}),
+            child_job_syncs=child_job_syncs,
+            **({} if parent_id == DEFAULT else {"parent_id": parent_id}),  # type: ignore
         )
+
+        # Shouldn't happen but inability to find a parent for progress reporting
+        # shouldn't raise and break the active job
+        with suppress(JobNotFound):
+            curr_parent = job
+            while curr_parent.parent_id:
+                curr_parent = self.get_job(curr_parent.parent_id)
+                if not curr_parent.child_job_syncs:
+                    continue
+
+                # HACK: If parent trigger the same child job, we just skip this second
+                # sync. Maybe it would be better to have this reflected in the job stage
+                # and reset progress to 0 instead? There is no support for such stage
+                # information on Core update entities today though.
+                if curr_parent.done is True or curr_parent.progress >= 100:
+                    _LOGGER.debug(
+                        "Skipping parent job sync for done parent job %s",
+                        curr_parent.name,
+                    )
+                    continue
+
+                # Break after first match at each parent as it doesn't make sense
+                # to match twice. But it could match multiple parents
+                for sync in curr_parent.child_job_syncs:
+                    if sync.matches(job):
+                        job.parent_job_syncs.append(
+                            ParentJobSync(
+                                curr_parent.uuid,
+                                starting_progress=curr_parent.progress,
+                                progress_allocation=sync.progress_allocation,
+                            )
+                        )
+                        break
+
         self._jobs[job.uuid] = job
         return job
 
@@ -265,13 +379,13 @@ class JobManager(FileConfiguration, CoreSysAttributes):
 
     def schedule_job(
         self,
-        job_method: Callable[..., Awaitable[Any]],
+        job_method: Callable[..., Coroutine],
         options: JobSchedulerOptions,
         *args,
         **kwargs,
     ) -> tuple[SupervisorJob, asyncio.Task | asyncio.TimerHandle]:
         """Schedule a job to run later and return job and task or timer handle."""
-        job = self.new_job(no_parent=True)
+        job = self.new_job(parent_id=None)
 
         def _wrap_task() -> asyncio.Task:
             return self.sys_create_task(

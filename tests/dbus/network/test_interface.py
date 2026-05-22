@@ -55,13 +55,13 @@ async def test_network_interface_ethernet(
     interface = NetworkInterface("/org/freedesktop/NetworkManager/Devices/1")
 
     assert interface.sync_properties is False
-    assert interface.name is None
+    assert interface.interface_name is None
     assert interface.type is None
 
     await interface.connect(dbus_session_bus)
 
     assert interface.sync_properties is True
-    assert interface.name == TEST_INTERFACE_ETH_NAME
+    assert interface.interface_name == TEST_INTERFACE_ETH_NAME
     assert interface.type == DeviceType.ETHERNET
     assert interface.managed is True
     assert interface.wireless is None
@@ -108,7 +108,7 @@ async def test_network_interface_wlan(
     await interface.connect(dbus_session_bus)
 
     assert interface.sync_properties is True
-    assert interface.name == TEST_INTERFACE_WLAN_NAME
+    assert interface.interface_name == TEST_INTERFACE_WLAN_NAME
     assert interface.type == DeviceType.WIRELESS
     assert interface.wireless is not None
     assert interface.wireless.bitrate == 0
@@ -184,3 +184,20 @@ async def test_interface_becomes_unmanaged(
     assert wireless.is_connected is False
     assert eth0.connection is None
     assert connection.is_connected is False
+
+
+async def test_unknown_device_type(
+    device_eth0_service: DeviceService, dbus_session_bus: MessageBus
+):
+    """Test unknown device types are handled gracefully."""
+    interface = NetworkInterface("/org/freedesktop/NetworkManager/Devices/1")
+    await interface.connect(dbus_session_bus)
+
+    # Emit an unknown device type (e.g., 1000 which doesn't exist in the enum)
+    device_eth0_service.emit_properties_changed({"DeviceType": 1000})
+    await device_eth0_service.ping()
+
+    # Should return UNKNOWN instead of crashing
+    assert interface.type == DeviceType.UNKNOWN
+    # Wireless should be None since it's not a wireless device
+    assert interface.wireless is None

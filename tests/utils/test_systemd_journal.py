@@ -8,6 +8,7 @@ import pytest
 from supervisor.exceptions import MalformedBinaryEntryError
 from supervisor.host.const import LogFormatter
 from supervisor.utils.systemd_journal import (
+    journal_boots_reader,
     journal_logs_reader,
     journal_plain_formatter,
     journal_verbose_formatter,
@@ -82,6 +83,22 @@ def test_format_verbose_newlines():
     assert (
         journal_verbose_formatter(fields)
         == "2013-09-17 07:32:51.000 homeassistant python[666]: Hello,\nworld!\n"
+    )
+
+
+def test_format_verbose_colors():
+    """Test verbose formatter with ANSI colors in message."""
+    fields = {
+        "__REALTIME_TIMESTAMP": "1379403171000000",
+        "_HOSTNAME": "homeassistant",
+        "SYSLOG_IDENTIFIER": "python",
+        "_PID": "666",
+        "MESSAGE": "\x1b[32mHello, world!\x1b[0m",
+    }
+
+    assert (
+        journal_verbose_formatter(fields)
+        == "2013-09-17 07:32:51.000 homeassistant python[666]: \x1b[32mHello, world!\x1b[0m"
     )
 
 
@@ -205,3 +222,145 @@ async def test_parsing_colored_supervisor_logs():
         line
         == "\x1b[32m24-03-04 23:56:56 INFO (MainThread) [__main__] Closing Supervisor\x1b[0m"
     )
+
+
+async def test_parsing_boots():
+    """Test parsing of boots."""
+    journal_logs, stream = _journal_logs_mock()
+    stream.feed_data(
+        b'\x1e{"index":0,"boot_id":"e9ba6e5d9bc745c591686a502e3ed817","first_entry":1748251653514247,"last_entry":1748258595644563}\x0a'
+        b'\x1e{"index":-1,"boot_id":"2087f5f269724a48852c92a2e663fb94","first_entry":1748012078520355,"last_entry":1748023322834353}\x0a'
+        b'\x1e{"index":-2,"boot_id":"865a4aa6128e4747917047c09f400d0d","first_entry":1748011941404183,"last_entry":1748012025742472}'
+    )
+    stream.feed_eof()
+
+    boots = []
+    async for index, boot_id in journal_boots_reader(journal_logs):
+        boots.append((index, boot_id))
+
+    assert boots == [
+        (0, "e9ba6e5d9bc745c591686a502e3ed817"),
+        (-1, "2087f5f269724a48852c92a2e663fb94"),
+        (-2, "865a4aa6128e4747917047c09f400d0d"),
+    ]
+
+
+async def test_parsing_boots_no_lf():
+    """Test parsing of boots without LF separator (only RS)."""
+    journal_logs, stream = _journal_logs_mock()
+    stream.feed_data(
+        b'\x1e{"index":0,"boot_id":"e9ba6e5d9bc745c591686a502e3ed817","first_entry":1748251653514247,"last_entry":1748258595644563}'
+        b'\x1e{"index":-1,"boot_id":"2087f5f269724a48852c92a2e663fb94","first_entry":1748012078520355,"last_entry":1748023322834353}'
+        b'\x1e{"index":-2,"boot_id":"865a4aa6128e4747917047c09f400d0d","first_entry":1748011941404183,"last_entry":1748012025742472}'
+    )
+    stream.feed_eof()
+
+    boots = []
+    async for index, boot_id in journal_boots_reader(journal_logs):
+        boots.append((index, boot_id))
+
+    assert boots == [
+        (0, "e9ba6e5d9bc745c591686a502e3ed817"),
+        (-1, "2087f5f269724a48852c92a2e663fb94"),
+        (-2, "865a4aa6128e4747917047c09f400d0d"),
+    ]
+
+
+async def test_parsing_boots_single():
+    """Test parsing of single boot with trailing LF."""
+    journal_logs, stream = _journal_logs_mock()
+    stream.feed_data(
+        b'\x1e{"index":0,"boot_id":"e9ba6e5d9bc745c591686a502e3ed817","first_entry":1748251653514247,"last_entry":1748258595644563}\x0a'
+    )
+    stream.feed_eof()
+
+    boots = []
+    async for index, boot_id in journal_boots_reader(journal_logs):
+        boots.append((index, boot_id))
+
+    assert boots == [(0, "e9ba6e5d9bc745c591686a502e3ed817")]
+
+
+async def test_parsing_boots_none():
+    """Test parsing of empty boot response."""
+    journal_logs, stream = _journal_logs_mock()
+    stream.feed_eof()
+
+    boots = []
+    async for index, boot_id in journal_boots_reader(journal_logs):
+        boots.append((index, boot_id))
+
+    assert boots == []
+
+
+async def test_parsing_non_utf8_message():
+    """Test that non-UTF-8 bytes in message are replaced with replacement character."""
+    journal_logs, stream = _journal_logs_mock()
+    # Include invalid UTF-8 sequence (0xff is not valid UTF-8)
+    stream.feed_data(b"MESSAGE=Hello, \xff world!\n\n")
+    _, line = await anext(journal_logs_reader(journal_logs))
+    assert line == "Hello, \ufffd world!"
+
+
+async def test_parsing_non_utf8_in_binary_message():
+    """Test that non-UTF-8 bytes in binary format message are replaced."""
+    journal_logs, stream = _journal_logs_mock()
+    # Binary format with invalid UTF-8 sequence
+    stream.feed_data(
+        b"ID=1\n"
+        b"MESSAGE\n\x0f\x00\x00\x00\x00\x00\x00\x00Hello, \xff world!\n"
+        b"AFTER=after\n\n"
+    )
+    _, line = await anext(journal_logs_reader(journal_logs))
+    assert line == "Hello, \ufffd world!"
+
+
+def test_format_plain_no_colors():
+    """Test plain formatter strips ANSI color codes when no_colors=True."""
+    fields = {"MESSAGE": "\x1b[32mHello, world!\x1b[0m"}
+    assert journal_plain_formatter(fields, no_colors=True) == "Hello, world!"
+
+
+def test_format_verbose_no_colors():
+    """Test verbose formatter strips ANSI color codes when no_colors=True."""
+    fields = {
+        "__REALTIME_TIMESTAMP": "1379403171000000",
+        "_HOSTNAME": "homeassistant",
+        "SYSLOG_IDENTIFIER": "python",
+        "_PID": "666",
+        "MESSAGE": "\x1b[32mHello, world!\x1b[0m",
+    }
+    assert (
+        journal_verbose_formatter(fields, no_colors=True)
+        == "2013-09-17 07:32:51.000 homeassistant python[666]: Hello, world!"
+    )
+
+
+async def test_parsing_colored_logs_verbose_no_colors():
+    """Test verbose formatter strips colors from colored logs."""
+    journal_logs, stream = _journal_logs_mock()
+    stream.feed_data(
+        b"__REALTIME_TIMESTAMP=1379403171000000\n"
+        b"_HOSTNAME=homeassistant\n"
+        b"SYSLOG_IDENTIFIER=python\n"
+        b"_PID=666\n"
+        b"MESSAGE\n\x0e\x00\x00\x00\x00\x00\x00\x00\x1b[31mERROR\x1b[0m\n"
+        b"AFTER=after\n\n"
+    )
+    _, line = await anext(
+        journal_logs_reader(
+            journal_logs, log_formatter=LogFormatter.VERBOSE, no_colors=True
+        )
+    )
+    assert line == "2013-09-17 07:32:51.000 homeassistant python[666]: ERROR"
+
+
+async def test_parsing_multiple_color_codes():
+    """Test stripping multiple ANSI color codes in single message."""
+    journal_logs, stream = _journal_logs_mock()
+    stream.feed_data(
+        b"MESSAGE\n\x29\x00\x00\x00\x00\x00\x00\x00\x1b[31mRed\x1b[0m \x1b[32mGreen\x1b[0m \x1b[34mBlue\x1b[0m\n"
+        b"AFTER=after\n\n"
+    )
+    _, line = await anext(journal_logs_reader(journal_logs, no_colors=True))
+    assert line == "Red Green Blue"

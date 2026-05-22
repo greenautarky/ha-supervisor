@@ -20,6 +20,14 @@ TEST_BOOT_IDS = [
     "b1c386a144fd44db8f855d7e907256f8",
 ]
 
+TEST_BOOTS_IDS_NATIVE = [
+    "77f66b1fd6b2416e8eebf509c9a470e6",
+    "2411cf84b38a41939de746afc7a22e18",
+    "3fa78d16a4ee4975b632d24dea52404c",
+    "b81a432efb2d4a71a1e2d1b42892c187",
+    "aeaa3d67efe9410ba7210cbee21bb022",
+]
+
 
 async def test_load(coresys: CoreSys):
     """Test load."""
@@ -82,7 +90,54 @@ async def test_logs_coloured(journald_gateway: MagicMock, coresys: CoreSys):
         )
 
 
-async def test_boot_ids(journald_gateway: MagicMock, coresys: CoreSys):
+async def test_logs_no_colors(journald_gateway: MagicMock, coresys: CoreSys):
+    """Test ANSI color codes being stripped when no_colors=True."""
+    journald_gateway.content.feed_data(
+        load_fixture("logs_export_supervisor.txt").encode("utf-8")
+    )
+    journald_gateway.content.feed_eof()
+
+    async with coresys.host.logs.journald_logs() as resp:
+        cursor, line = await anext(journal_logs_reader(resp, no_colors=True))
+        assert (
+            cursor
+            == "s=83fee99ca0c3466db5fc120d52ca7dd8;i=2049389;b=f5a5c442fa6548cf97474d2d57c920b3;m=4263828e8c;t=612dda478b01b;x=9ae12394c9326930"
+        )
+        # Colors should be stripped
+        assert (
+            line == "24-03-04 23:56:56 INFO (MainThread) [__main__] Closing Supervisor"
+        )
+
+
+async def test_logs_verbose_no_colors(journald_gateway: MagicMock, coresys: CoreSys):
+    """Test ANSI color codes being stripped from verbose formatted logs when no_colors=True."""
+    journald_gateway.content.feed_data(
+        load_fixture("logs_export_supervisor.txt").encode("utf-8")
+    )
+    journald_gateway.content.feed_eof()
+
+    async with coresys.host.logs.journald_logs() as resp:
+        cursor, line = await anext(
+            journal_logs_reader(
+                resp, log_formatter=LogFormatter.VERBOSE, no_colors=True
+            )
+        )
+        assert (
+            cursor
+            == "s=83fee99ca0c3466db5fc120d52ca7dd8;i=2049389;b=f5a5c442fa6548cf97474d2d57c920b3;m=4263828e8c;t=612dda478b01b;x=9ae12394c9326930"
+        )
+        # Colors should be stripped in verbose format too
+        assert (
+            line
+            == "2024-03-04 22:56:56.709 ha-hloub hassio_supervisor[466]: 24-03-04 23:56:56 INFO (MainThread) [__main__] Closing Supervisor"
+        )
+
+
+async def test_boot_ids(
+    journald_gateway: MagicMock,
+    coresys: CoreSys,
+    without_journal_gatewayd_boots: MagicMock,
+):
     """Test getting boot ids."""
     journald_gateway.content.feed_data(
         load_fixture("logs_boot_ids.txt").encode("utf-8")
@@ -109,7 +164,11 @@ async def test_boot_ids(journald_gateway: MagicMock, coresys: CoreSys):
         await coresys.host.logs.get_boot_id(3)
 
 
-async def test_boot_ids_fallback(journald_gateway: MagicMock, coresys: CoreSys):
+async def test_boot_ids_legacy_fallback(
+    journald_gateway: MagicMock,
+    coresys: CoreSys,
+    without_journal_gatewayd_boots: MagicMock,
+):
     """Test getting boot ids using fallback."""
     # Initial response has no log lines
     journald_gateway.content.feed_data(b"")
@@ -132,6 +191,16 @@ async def test_boot_ids_fallback(journald_gateway: MagicMock, coresys: CoreSys):
     assert await coresys.host.logs.get_boot_ids() == [
         "b2aca10d5ca54fb1b6fb35c85a0efca9"
     ]
+
+
+async def test_boot_ids_native(journald_gateway: MagicMock, coresys: CoreSys):
+    """Test getting boot ids from /boots endpoint."""
+    journald_gateway.content.feed_data(
+        load_fixture("systemd_journal_boots.jsons").encode("utf-8")
+    )
+    journald_gateway.content.feed_eof()
+
+    assert await coresys.host.logs.get_boot_ids() == TEST_BOOTS_IDS_NATIVE
 
 
 async def test_identifiers(journald_gateway: MagicMock, coresys: CoreSys):

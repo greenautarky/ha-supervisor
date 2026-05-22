@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 import logging
 
+from ...const import BusEvent
 from ...coresys import CoreSys, CoreSysAttributes
 from ...exceptions import ResolutionFixupError
 from ..const import ContextType, IssueType, SuggestionType
@@ -22,9 +23,7 @@ class FixupBase(ABC, CoreSysAttributes):
         """Execute the evaluation."""
         if not fixing_suggestion:
             # Get suggestion to fix
-            fixing_suggestion: Suggestion | None = next(
-                iter(self.all_suggestions), None
-            )
+            fixing_suggestion = next(iter(self.all_suggestions), None)
 
         # No suggestion
         if fixing_suggestion is None:
@@ -67,6 +66,11 @@ class FixupBase(ABC, CoreSysAttributes):
     def auto(self) -> bool:
         """Return if a fixup can be apply as auto fix."""
         return False
+
+    @property
+    def bus_event(self) -> BusEvent | None:
+        """Return the BusEvent that triggers this fixup, or None if not event-based."""
+        return None
 
     @property
     def all_suggestions(self) -> list[Suggestion]:

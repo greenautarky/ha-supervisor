@@ -2,19 +2,23 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
-from ipaddress import IPv4Network
+from ipaddress import IPv4Network, IPv6Network
 from pathlib import Path
 from sys import version_info as systemversion
-from typing import Self
+from typing import NotRequired, Self, TypedDict
 
 from aiohttp import __version__ as aiohttpversion
 
-SUPERVISOR_VERSION = "9999.09.9.dev9999"
+SUPERVISOR_VERSION = "2025.11.5.1"
 SERVER_SOFTWARE = f"HomeAssistantSupervisor/{SUPERVISOR_VERSION} aiohttp/{aiohttpversion} Python/{systemversion[0]}.{systemversion[1]}"
+
+DOCKER_PREFIX: str = "hassio"
+OBSERVER_DOCKER_NAME: str = f"{DOCKER_PREFIX}_observer"
+SUPERVISOR_DOCKER_NAME: str = f"{DOCKER_PREFIX}_supervisor"
 
 URL_HASSIO_ADDONS = "https://github.com/home-assistant/addons"
 URL_HASSIO_APPARMOR = "https://version.home-assistant.io/apparmor_{channel}.txt"
-URL_HASSIO_VERSION = "https://version.home-assistant.io/{channel}.json"
+URL_HASSIO_VERSION = "https://raw.githubusercontent.com/greenautarky/haos-version/main/{channel}.json"
 
 SUPERVISOR_DATA = Path("/data")
 
@@ -41,8 +45,10 @@ SYSTEMD_JOURNAL_PERSISTENT = Path("/var/log/journal")
 SYSTEMD_JOURNAL_VOLATILE = Path("/run/log/journal")
 
 DOCKER_NETWORK = "hassio"
-DOCKER_NETWORK_MASK = IPv4Network("172.30.32.0/23")
-DOCKER_NETWORK_RANGE = IPv4Network("172.30.33.0/24")
+DOCKER_NETWORK_DRIVER = "bridge"
+DOCKER_IPV6_NETWORK_MASK = IPv6Network("fd0c:ac1e:2100::/48")
+DOCKER_IPV4_NETWORK_MASK = IPv4Network("172.30.32.0/23")
+DOCKER_IPV4_NETWORK_RANGE = IPv4Network("172.30.33.0/24")
 
 # This needs to match the dockerd --cpu-rt-runtime= argument.
 DOCKER_CPU_RUNTIME_TOTAL = 950_000
@@ -70,6 +76,8 @@ JSON_DATA = "data"
 JSON_MESSAGE = "message"
 JSON_RESULT = "result"
 JSON_JOB_ID = "job_id"
+JSON_ERROR_KEY = "error_key"
+JSON_EXTRA_FIELDS = "extra_fields"
 
 RESULT_ERROR = "error"
 RESULT_OK = "ok"
@@ -172,15 +180,19 @@ ATTR_DOCKER_API = "docker_api"
 ATTR_DOCUMENTATION = "documentation"
 ATTR_DOMAINS = "domains"
 ATTR_ENABLE = "enable"
+ATTR_ENABLE_IPV6 = "enable_ipv6"
 ATTR_ENABLED = "enabled"
+ATTR_MTU = "mtu"
 ATTR_ENVIRONMENT = "environment"
 ATTR_EVENT = "event"
 ATTR_EXCLUDE_DATABASE = "exclude_database"
 ATTR_EXTRA = "extra"
 ATTR_FEATURES = "features"
+ATTR_FIELDS = "fields"
 ATTR_FILENAME = "filename"
 ATTR_FLAGS = "flags"
 ATTR_FOLDERS = "folders"
+ATTR_FORCE = "force"
 ATTR_FORCE_SECURITY = "force_security"
 ATTR_FREQUENCY = "frequency"
 ATTR_FULL_ACCESS = "full_access"
@@ -189,6 +201,8 @@ ATTR_GPIO = "gpio"
 ATTR_HASSIO_API = "hassio_api"
 ATTR_HASSIO_ROLE = "hassio_role"
 ATTR_HASSOS = "hassos"
+ATTR_HASSOS_UNRESTRICTED = "hassos_unrestricted"
+ATTR_HASSOS_UPGRADE = "hassos_upgrade"
 ATTR_HEALTHY = "healthy"
 ATTR_HEARTBEAT_LED = "heartbeat_led"
 ATTR_HOMEASSISTANT = "homeassistant"
@@ -232,6 +246,7 @@ ATTR_KERNEL_MODULES = "kernel_modules"
 ATTR_LABELS = "labels"
 ATTR_LAST_BOOT = "last_boot"
 ATTR_LEGACY = "legacy"
+ATTR_LLMNR = "llmnr"
 ATTR_LOCALS = "locals"
 ATTR_LOCATION = "location"
 ATTR_LOGGING = "logging"
@@ -239,8 +254,10 @@ ATTR_LOGO = "logo"
 ATTR_LONG_DESCRIPTION = "long_description"
 ATTR_MAC = "mac"
 ATTR_MACHINE = "machine"
+ATTR_MACHINE_ID = "machine_id"
 ATTR_MAINTAINER = "maintainer"
 ATTR_MAP = "map"
+ATTR_MDNS = "mdns"
 ATTR_MEMORY_LIMIT = "memory_limit"
 ATTR_MEMORY_PERCENT = "memory_percent"
 ATTR_MEMORY_USAGE = "memory_usage"
@@ -331,6 +348,7 @@ ATTR_TRANSLATIONS = "translations"
 ATTR_TYPE = "type"
 ATTR_UART = "uart"
 ATTR_UDEV = "udev"
+ATTR_ULIMITS = "ulimits"
 ATTR_UNHEALTHY = "unhealthy"
 ATTR_UNSAVED = "unsaved"
 ATTR_UNSUPPORTED = "unsupported"
@@ -407,10 +425,12 @@ class AddonBoot(StrEnum):
     MANUAL = "manual"
 
     @classmethod
-    def _missing_(cls, value: str) -> Self | None:
+    def _missing_(cls, value: object) -> Self | None:
         """Convert 'forced' config values to their counterpart."""
         if value == AddonBootConfig.MANUAL_ONLY:
-            return AddonBoot.MANUAL
+            for member in cls:
+                if member == AddonBoot.MANUAL:
+                    return member
         return None
 
 
@@ -489,6 +509,7 @@ class BusEvent(StrEnum):
     """Bus event type."""
 
     DOCKER_CONTAINER_STATE_CHANGE = "docker_container_state_change"
+    DOCKER_IMAGE_PULL_UPDATE = "docker_image_pull_update"
     HARDWARE_NEW_DEVICE = "hardware_new_device"
     HARDWARE_REMOVE_DEVICE = "hardware_remove_device"
     SUPERVISOR_CONNECTIVITY_CHANGE = "supervisor_connectivity_change"
@@ -507,6 +528,16 @@ class CpuArch(StrEnum):
     AMD64 = "amd64"
 
 
+class IngressSessionDataUserDict(TypedDict):
+    """Response object for ingress session user."""
+
+    id: str
+    username: NotRequired[str | None]
+    # Name is an alias for displayname, only one should be used
+    displayname: NotRequired[str | None]
+    name: NotRequired[str | None]
+
+
 @dataclass
 class IngressSessionDataUser:
     """Format of an IngressSessionDataUser object."""
@@ -515,22 +546,26 @@ class IngressSessionDataUser:
     display_name: str | None = None
     username: str | None = None
 
-    def to_dict(self) -> dict[str, str | None]:
+    def to_dict(self) -> IngressSessionDataUserDict:
         """Get dictionary representation."""
-        return {
-            ATTR_ID: self.id,
-            ATTR_DISPLAYNAME: self.display_name,
-            ATTR_USERNAME: self.username,
-        }
+        return IngressSessionDataUserDict(
+            id=self.id, displayname=self.display_name, username=self.username
+        )
 
     @classmethod
-    def from_dict(cls, data: dict[str, str | None]) -> Self:
+    def from_dict(cls, data: IngressSessionDataUserDict) -> Self:
         """Return object from dictionary representation."""
         return cls(
-            id=data[ATTR_ID],
-            display_name=data.get(ATTR_DISPLAYNAME),
-            username=data.get(ATTR_USERNAME),
+            id=data["id"],
+            display_name=data.get("displayname") or data.get("name"),
+            username=data.get("username"),
         )
+
+
+class IngressSessionDataDict(TypedDict):
+    """Response object for ingress session data."""
+
+    user: IngressSessionDataUserDict
 
 
 @dataclass
@@ -539,14 +574,14 @@ class IngressSessionData:
 
     user: IngressSessionDataUser
 
-    def to_dict(self) -> dict[str, dict[str, str | None]]:
+    def to_dict(self) -> IngressSessionDataDict:
         """Get dictionary representation."""
-        return {ATTR_USER: self.user.to_dict()}
+        return IngressSessionDataDict(user=self.user.to_dict())
 
     @classmethod
-    def from_dict(cls, data: dict[str, dict[str, str | None]]) -> Self:
+    def from_dict(cls, data: IngressSessionDataDict) -> Self:
         """Return object from dictionary representation."""
-        return cls(user=IngressSessionDataUser.from_dict(data[ATTR_USER]))
+        return cls(user=IngressSessionDataUser.from_dict(data["user"]))
 
 
 STARTING_STATES = [

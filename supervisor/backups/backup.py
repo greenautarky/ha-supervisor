@@ -18,8 +18,6 @@ import time
 from typing import Any, Self, cast
 
 from awesomeversion import AwesomeVersion, AwesomeVersionCompareException
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from securetar import AddFileError, SecureTarFile, atomic_contents_add, secure_path
 import voluptuous as vol
 from voluptuous.humanize import humanize_error
@@ -62,8 +60,10 @@ from ..utils.dt import parse_datetime, utcnow
 from ..utils.json import json_bytes
 from ..utils.sentinel import DEFAULT
 from .const import BUF_SIZE, LOCATION_CLOUD_BACKUP, BackupType
-from .utils import key_to_iv, password_to_key
+from .utils import password_to_key
 from .validate import SCHEMA_BACKUP
+
+IGNORED_COMPARISON_FIELDS = {ATTR_PROTECTED, ATTR_CRYPTO, ATTR_DOCKER}
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -102,7 +102,6 @@ class Backup(JobGroup):
         self._tmp: TemporaryDirectory | None = None
         self._outer_secure_tarfile: SecureTarFile | None = None
         self._key: bytes | None = None
-        self._aes: Cipher | None = None
         self._locations: dict[str | None, BackupLocation] = {
             location: BackupLocation(
                 path=tar_file,
@@ -263,41 +262,35 @@ class Backup(JobGroup):
 
     def __eq__(self, other: Any) -> bool:
         """Return true if backups have same metadata."""
-        if not isinstance(other, Backup):
-            return False
+        return isinstance(other, Backup) and self.slug == other.slug
 
-        # Compare all fields except ones about protection. Current encryption status does not affect equality
-        keys = self._data.keys() | other._data.keys()
-        for k in keys - {ATTR_PROTECTED, ATTR_CRYPTO, ATTR_DOCKER}:
-            if (
-                k not in self._data
-                or k not in other._data
-                or self._data[k] != other._data[k]
-            ):
-                _LOGGER.info(
-                    "Backup %s and %s not equal because %s field has different value: %s and %s",
-                    self.slug,
-                    other.slug,
-                    k,
-                    self._data.get(k),
-                    other._data.get(k),
-                )
-                return False
-        return True
+    def __hash__(self) -> int:
+        """Return hash of backup."""
+        return hash(self.slug)
 
     def consolidate(self, backup: Self) -> None:
         """Consolidate two backups with same slug in different locations."""
-        if self.slug != backup.slug:
+        if self != backup:
             raise ValueError(
                 f"Backup {self.slug} and {backup.slug} are not the same backup"
             )
-        if self != backup:
-            raise BackupInvalidError(
-                f"Backup in {backup.location} and {self.location} both have slug {self.slug} but are not the same!"
-            )
+
+        # Compare all fields except ones about protection. Current encryption status does not affect equality
+        other_data = backup._data  # pylint: disable=protected-access
+        keys = self._data.keys() | other_data.keys()
+        for k in keys - IGNORED_COMPARISON_FIELDS:
+            if (
+                k not in self._data
+                or k not in other_data
+                or self._data[k] != other_data[k]
+            ):
+                raise BackupInvalidError(
+                    f"Cannot consolidate backups in {backup.location} and {self.location} with slug {self.slug} "
+                    f"because field {k} has different values: {self._data.get(k)} and {other_data.get(k)}!",
+                    _LOGGER.error,
+                )
 
         # In case of conflict we always ignore the ones from the first one. But log them to let the user know
-
         if conflict := {
             loc: val.path
             for loc, val in self.all_locations.items()
@@ -348,16 +341,10 @@ class Backup(JobGroup):
             self._init_password(password)
         else:
             self._key = None
-            self._aes = None
 
     def _init_password(self, password: str) -> None:
-        """Set password + init aes cipher."""
+        """Create key from password."""
         self._key = password_to_key(password)
-        self._aes = Cipher(
-            algorithms.AES(self._key),
-            modes.CBC(key_to_iv(self._key)),
-            backend=default_backend(),
-        )
 
     async def validate_backup(self, location: str | None) -> None:
         """Validate backup.
@@ -586,13 +573,21 @@ class Backup(JobGroup):
     @Job(name="backup_addon_save", cleanup=False)
     async def _addon_save(self, addon: Addon) -> asyncio.Task | None:
         """Store an add-on into backup."""
-        self.sys_jobs.current.reference = addon.slug
+        self.sys_jobs.current.reference = slug = addon.slug
         if not self._outer_secure_tarfile:
             raise RuntimeError(
                 "Cannot backup components without initializing backup tar"
             )
 
-        tar_name = f"{addon.slug}.tar{'.gz' if self.compressed else ''}"
+        # Ensure it is still installed and get current data before proceeding
+        if not (curr_addon := self.sys_addons.get_local_only(slug)):
+            _LOGGER.warning(
+                "Skipping backup of add-on %s because it has been uninstalled",
+                slug,
+            )
+            return None
+
+        tar_name = f"{slug}.tar{'.gz' if self.compressed else ''}"
 
         addon_file = self._outer_secure_tarfile.create_inner_tar(
             f"./{tar_name}",
@@ -601,16 +596,16 @@ class Backup(JobGroup):
         )
         # Take backup
         try:
-            start_task = await addon.backup(addon_file)
+            start_task = await curr_addon.backup(addon_file)
         except AddonsError as err:
             raise BackupError(str(err)) from err
 
         # Store to config
         self._data[ATTR_ADDONS].append(
             {
-                ATTR_SLUG: addon.slug,
-                ATTR_NAME: addon.name,
-                ATTR_VERSION: addon.version,
+                ATTR_SLUG: slug,
+                ATTR_NAME: curr_addon.name,
+                ATTR_VERSION: curr_addon.version,
                 # Bug - addon_file.size used to give us this information
                 # It always returns 0 in current securetar. Skipping until fixed
                 ATTR_SIZE: 0,
@@ -930,5 +925,5 @@ class Backup(JobGroup):
         Return a coroutine.
         """
         return self.sys_store.update_repositories(
-            self.repositories, add_with_errors=True, replace=replace
+            set(self.repositories), issue_on_error=True, replace=replace
         )

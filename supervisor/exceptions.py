@@ -1,17 +1,32 @@
 """Core Exceptions."""
 
 from collections.abc import Callable
+from typing import Any
 
 
 class HassioError(Exception):
     """Root exception."""
 
+    error_key: str | None = None
+    message_template: str | None = None
+
     def __init__(
         self,
         message: str | None = None,
         logger: Callable[..., None] | None = None,
+        *,
+        extra_fields: dict[str, Any] | None = None,
     ) -> None:
         """Raise & log."""
+        self.extra_fields = extra_fields or {}
+
+        if not message and self.message_template:
+            message = (
+                self.message_template.format(**self.extra_fields)
+                if self.extra_fields
+                else self.message_template
+            )
+
         if logger is not None and message is not None:
             logger(message)
 
@@ -235,8 +250,71 @@ class AddonConfigurationError(AddonsError):
     """Error with add-on configuration."""
 
 
-class AddonsNotSupportedError(HassioNotSupportedError):
-    """Addons don't support a function."""
+class AddonNotSupportedError(HassioNotSupportedError):
+    """Addon doesn't support a function."""
+
+
+class AddonNotSupportedArchitectureError(AddonNotSupportedError):
+    """Addon does not support system due to architecture."""
+
+    error_key = "addon_not_supported_architecture_error"
+    message_template = "Add-on {slug} not supported on this platform, supported architectures: {architectures}"
+
+    def __init__(
+        self,
+        logger: Callable[..., None] | None = None,
+        *,
+        slug: str,
+        architectures: list[str],
+    ) -> None:
+        """Initialize exception."""
+        super().__init__(
+            None,
+            logger,
+            extra_fields={"slug": slug, "architectures": ", ".join(architectures)},
+        )
+
+
+class AddonNotSupportedMachineTypeError(AddonNotSupportedError):
+    """Addon does not support system due to machine type."""
+
+    error_key = "addon_not_supported_machine_type_error"
+    message_template = "Add-on {slug} not supported on this machine, supported machine types: {machine_types}"
+
+    def __init__(
+        self,
+        logger: Callable[..., None] | None = None,
+        *,
+        slug: str,
+        machine_types: list[str],
+    ) -> None:
+        """Initialize exception."""
+        super().__init__(
+            None,
+            logger,
+            extra_fields={"slug": slug, "machine_types": ", ".join(machine_types)},
+        )
+
+
+class AddonNotSupportedHomeAssistantVersionError(AddonNotSupportedError):
+    """Addon does not support system due to Home Assistant version."""
+
+    error_key = "addon_not_supported_home_assistant_version_error"
+    message_template = "Add-on {slug} not supported on this system, requires Home Assistant version {version} or greater"
+
+    def __init__(
+        self,
+        logger: Callable[..., None] | None = None,
+        *,
+        slug: str,
+        version: str,
+    ) -> None:
+        """Initialize exception."""
+        super().__init__(
+            None,
+            logger,
+            extra_fields={"slug": slug, "version": version},
+        )
 
 
 class AddonsJobError(AddonsError, JobException):
@@ -319,10 +397,17 @@ class APIError(HassioError, RuntimeError):
         self,
         message: str | None = None,
         logger: Callable[..., None] | None = None,
+        *,
         job_id: str | None = None,
+        error: HassioError | None = None,
     ) -> None:
         """Raise & log, optionally with job."""
-        super().__init__(message, logger)
+        # Allow these to be set from another error here since APIErrors essentially wrap others to add a status
+        self.error_key = error.error_key if error else None
+        self.message_template = error.message_template if error else None
+        super().__init__(
+            message, logger, extra_fields=error.extra_fields if error else None
+        )
         self.job_id = job_id
 
 
@@ -336,6 +421,12 @@ class APINotFound(APIError):
     """API not found error."""
 
     status = 404
+
+
+class APIGone(APIError):
+    """API is no longer available."""
+
+    status = 410
 
 
 class APIAddonNotInstalled(APIError):
@@ -492,21 +583,6 @@ class PwnedConnectivityError(PwnedError):
     """Connectivity errors while checking pwned passwords."""
 
 
-# util/codenotary
-
-
-class CodeNotaryError(HassioError):
-    """Error general with CodeNotary."""
-
-
-class CodeNotaryUntrusted(CodeNotaryError):
-    """Error on untrusted content."""
-
-
-class CodeNotaryBackendError(CodeNotaryError):
-    """CodeNotary backend error happening."""
-
-
 # util/whoami
 
 
@@ -554,6 +630,41 @@ class DockerTrustError(DockerError):
 
 class DockerNotFound(DockerError):
     """Docker object don't Exists."""
+
+
+class DockerLogOutOfOrder(DockerError):
+    """Raise when log from docker action was out of order."""
+
+
+class DockerNoSpaceOnDevice(DockerError):
+    """Raise if a docker pull fails due to available space."""
+
+    error_key = "docker_no_space_on_device"
+    message_template = "No space left on disk"
+
+    def __init__(self, logger: Callable[..., None] | None = None) -> None:
+        """Raise & log."""
+        super().__init__(None, logger=logger)
+
+
+class DockerHubRateLimitExceeded(DockerError):
+    """Raise for docker hub rate limit exceeded error."""
+
+    error_key = "dockerhub_rate_limit_exceeded"
+    message_template = (
+        "Your IP address has made too many requests to Docker Hub which activated a rate limit. "
+        "For more details see {dockerhub_rate_limit_url}"
+    )
+
+    def __init__(self, logger: Callable[..., None] | None = None) -> None:
+        """Raise & log."""
+        super().__init__(
+            None,
+            logger=logger,
+            extra_fields={
+                "dockerhub_rate_limit_url": "https://www.home-assistant.io/more-info/dockerhub-rate-limit"
+            },
+        )
 
 
 class DockerJobError(DockerError, JobException):

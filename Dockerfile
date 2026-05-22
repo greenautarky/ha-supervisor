@@ -2,7 +2,6 @@ ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
 ENV \
-    S6_READ_ONLY_ROOT=1 \
     S6_SERVICES_GRACETIME=10000 \
     SUPERVISOR_API=http://localhost \
     CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1 \
@@ -30,7 +29,7 @@ RUN \
     \
     && curl -Lso /usr/bin/cosign "https://github.com/home-assistant/cosign/releases/download/${COSIGN_VERSION}/cosign_${BUILD_ARCH}" \
     && chmod a+x /usr/bin/cosign \
-    && pip3 install uv==0.6.17
+    && pip3 install uv==0.8.9
 
 # Install requirements
 COPY requirements.txt .

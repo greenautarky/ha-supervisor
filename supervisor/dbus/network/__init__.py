@@ -44,7 +44,7 @@ MINIMAL_VERSION = AwesomeVersion("1.14.6")
 class NetworkManager(DBusInterfaceProxy):
     """Handle D-Bus interface for Network Manager.
 
-    https://developer.gnome.org/NetworkManager/stable/gdbus-org.freedesktop.NetworkManager.html
+    https://networkmanager.dev/docs/api/latest/gdbus-org.freedesktop.NetworkManager.html
     """
 
     name: str = DBUS_NAME_NM
@@ -134,9 +134,10 @@ class NetworkManager(DBusInterfaceProxy):
     async def check_connectivity(self, *, force: bool = False) -> ConnectivityState:
         """Check the connectivity of the host."""
         if force:
-            return await self.connected_dbus.call("check_connectivity")
-        else:
-            return await self.connected_dbus.get("connectivity")
+            return ConnectivityState(
+                await self.connected_dbus.call("check_connectivity")
+            )
+        return ConnectivityState(await self.connected_dbus.get("connectivity"))
 
     async def connect(self, bus: MessageBus) -> None:
         """Connect to system's D-Bus."""
@@ -259,7 +260,7 @@ class NetworkManager(DBusInterfaceProxy):
             else:
                 interface.primary = False
 
-            interfaces[interface.name] = interface
+            interfaces[interface.interface_name] = interface
             interfaces[interface.hw_address] = interface
 
         # Disconnect removed devices

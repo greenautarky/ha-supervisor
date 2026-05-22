@@ -21,6 +21,9 @@ class CheckMultipleDataDisks(CheckBase):
 
     async def run_check(self) -> None:
         """Run check if not affected by issue."""
+        if not self.sys_os.available:
+            return
+
         for block_device in self.sys_dbus.udisks2.block_devices:
             if self._block_device_has_name_issue(block_device):
                 self.sys_resolution.create_issue(
@@ -35,6 +38,9 @@ class CheckMultipleDataDisks(CheckBase):
 
     async def approve_check(self, reference: str | None = None) -> bool:
         """Approve check if it is affected by issue."""
+        if not reference:
+            return False
+
         resolved = await self.sys_dbus.udisks2.resolve_device(
             DeviceSpecification(path=Path(reference))
         )
@@ -43,7 +49,7 @@ class CheckMultipleDataDisks(CheckBase):
     def _block_device_has_name_issue(self, block_device: UDisks2Block) -> bool:
         """Return true if filesystem block device incorrectly has data disk name."""
         return (
-            block_device.filesystem
+            block_device.filesystem is not None
             and block_device.id_label == FILESYSTEM_LABEL_DATA_DISK
             and block_device.device != self.sys_dbus.agent.datadisk.current_device
         )

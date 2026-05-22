@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiohttp.hdrs import WWW_AUTHENTICATE
 from aiohttp.test_utils import TestClient
 import pytest
 
@@ -119,14 +120,42 @@ async def test_list_users(
     ]
 
 
-@pytest.mark.parametrize("api_client", [TEST_ADDON_SLUG], indirect=True)
+@pytest.mark.parametrize(
+    ("field", "api_client"),
+    [("username", TEST_ADDON_SLUG), ("user", TEST_ADDON_SLUG)],
+    indirect=["api_client"],
+)
 async def test_auth_json_success(
-    api_client: TestClient, mock_check_login: AsyncMock, install_addon_ssh: Addon
+    api_client: TestClient,
+    mock_check_login: AsyncMock,
+    install_addon_ssh: Addon,
+    field: str,
 ):
     """Test successful JSON auth."""
     mock_check_login.return_value = True
-    resp = await api_client.post("/auth", json={"username": "test", "password": "pass"})
+    resp = await api_client.post("/auth", json={field: "test", "password": "pass"})
     assert resp.status == 200
+
+
+@pytest.mark.parametrize(
+    ("user", "password", "api_client"),
+    [
+        (None, "password", TEST_ADDON_SLUG),
+        ("user", None, TEST_ADDON_SLUG),
+    ],
+    indirect=["api_client"],
+)
+async def test_auth_json_failure_none(
+    api_client: TestClient,
+    mock_check_login: AsyncMock,
+    install_addon_ssh: Addon,
+    user: str | None,
+    password: str | None,
+):
+    """Test failed JSON auth with none user or password."""
+    mock_check_login.return_value = True
+    resp = await api_client.post("/auth", json={"username": user, "password": password})
+    assert resp.status == 401
 
 
 @pytest.mark.parametrize("api_client", [TEST_ADDON_SLUG], indirect=True)
@@ -138,8 +167,8 @@ async def test_auth_json_invalid_credentials(
     resp = await api_client.post(
         "/auth", json={"username": "test", "password": "wrong"}
     )
-    # Do we really want the API to return 400 here?
-    assert resp.status == 400
+    assert WWW_AUTHENTICATE not in resp.headers
+    assert resp.status == 401
 
 
 @pytest.mark.parametrize("api_client", [TEST_ADDON_SLUG], indirect=True)
@@ -148,7 +177,7 @@ async def test_auth_json_empty_body(api_client: TestClient, install_addon_ssh: A
     resp = await api_client.post(
         "/auth", data="", headers={"Content-Type": "application/json"}
     )
-    assert resp.status == 400
+    assert resp.status == 401
 
 
 @pytest.mark.parametrize("api_client", [TEST_ADDON_SLUG], indirect=True)
@@ -185,8 +214,8 @@ async def test_auth_urlencoded_failure(
         data="username=test&password=fail",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    # Do we really want the API to return 400 here?
-    assert resp.status == 400
+    assert WWW_AUTHENTICATE not in resp.headers
+    assert resp.status == 401
 
 
 @pytest.mark.parametrize("api_client", [TEST_ADDON_SLUG], indirect=True)
@@ -197,7 +226,7 @@ async def test_auth_unsupported_content_type(
     resp = await api_client.post(
         "/auth", data="something", headers={"Content-Type": "text/plain"}
     )
-    # This probably should be 400 here for better consistency
+    assert "Basic realm" in resp.headers[WWW_AUTHENTICATE]
     assert resp.status == 401
 
 

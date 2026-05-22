@@ -9,6 +9,7 @@ import subprocess
 from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
 from uuid import uuid4
 
+from aiodocker.docker import DockerImages
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestClient
 from awesomeversion import AwesomeVersion
@@ -46,6 +47,7 @@ from supervisor.coresys import CoreSys
 from supervisor.dbus.network import NetworkManager
 from supervisor.docker.manager import DockerAPI
 from supervisor.docker.monitor import DockerMonitor
+from supervisor.exceptions import HostLogError
 from supervisor.homeassistant.api import APIState
 from supervisor.host.logs import LogsControl
 from supervisor.os.manager import OSManager
@@ -54,6 +56,7 @@ from supervisor.store.repository import Repository
 from supervisor.utils.dt import utcnow
 
 from .common import (
+    AsyncIterator,
     MockResponse,
     load_binary_fixture,
     load_fixture,
@@ -63,9 +66,16 @@ from .common import (
 from .const import TEST_ADDON_SLUG
 from .dbus_service_mocks.base import DBusServiceMock
 from .dbus_service_mocks.network_connection_settings import (
+    DEFAULT_OBJECT_PATH as DEFAULT_CONNECTION_SETTINGS_OBJECT_PATH,
     ConnectionSettings as ConnectionSettingsService,
 )
+from .dbus_service_mocks.network_dns_manager import DnsManager as DnsManagerService
 from .dbus_service_mocks.network_manager import NetworkManager as NetworkManagerService
+
+from tests.dbus_service_mocks.network_active_connection import (
+    DEFAULT_OBJECT_PATH as DEFAULT_ACTIVE_CONNECTION_OBJECT_PATH,
+    ActiveConnection as ActiveConnectionService,
+)
 
 # pylint: disable=redefined-outer-name, protected-access
 
@@ -104,33 +114,45 @@ async def supervisor_name() -> None:
 @pytest.fixture
 async def docker() -> DockerAPI:
     """Mock DockerAPI."""
-    images = [MagicMock(tags=["ghcr.io/home-assistant/amd64-hassio-supervisor:latest"])]
-    image = MagicMock()
-    image.attrs = {"Os": "linux", "Architecture": "amd64"}
+    image_inspect = {
+        "Os": "linux",
+        "Architecture": "amd64",
+        "Id": "test123",
+        "RepoTags": ["ghcr.io/home-assistant/amd64-hassio-supervisor:latest"],
+    }
 
     with (
         patch("supervisor.docker.manager.DockerClient", return_value=MagicMock()),
-        patch("supervisor.docker.manager.DockerAPI.images", return_value=MagicMock()),
         patch(
             "supervisor.docker.manager.DockerAPI.containers", return_value=MagicMock()
         ),
         patch("supervisor.docker.manager.DockerAPI.api", return_value=MagicMock()),
-        patch("supervisor.docker.manager.DockerAPI.images.get", return_value=image),
-        patch("supervisor.docker.manager.DockerAPI.images.list", return_value=images),
-        patch(
-            "supervisor.docker.manager.DockerAPI.info",
-            return_value=MagicMock(),
-        ),
+        patch("supervisor.docker.manager.DockerAPI.info", return_value=MagicMock()),
         patch("supervisor.docker.manager.DockerAPI.unload"),
+        patch("supervisor.docker.manager.aiodocker.Docker", return_value=MagicMock()),
+        patch(
+            "supervisor.docker.manager.DockerAPI.images",
+            new=PropertyMock(
+                return_value=(docker_images := MagicMock(spec=DockerImages))
+            ),
+        ),
     ):
         docker_obj = await DockerAPI(MagicMock()).post_init()
         docker_obj.config._data = {"registries": {}}
         with patch("supervisor.docker.monitor.DockerMonitor.load"):
             await docker_obj.load()
 
+        docker_images.inspect.return_value = image_inspect
+        docker_images.list.return_value = [image_inspect]
+        docker_images.import_image.return_value = [
+            {"stream": "Loaded image: test:latest\n"}
+        ]
+
+        docker_images.pull.return_value = AsyncIterator([{}])
+
         docker_obj.info.logging = "journald"
         docker_obj.info.storage = "overlay2"
-        docker_obj.info.version = "1.0.0"
+        docker_obj.info.version = AwesomeVersion("1.0.0")
 
         yield docker_obj
 
@@ -183,13 +205,21 @@ async def fixture_network_manager_services(
                 "/org/freedesktop/NetworkManager/AccessPoint/43099",
                 "/org/freedesktop/NetworkManager/AccessPoint/43100",
             ],
-            "network_active_connection": None,
-            "network_connection_settings": None,
+            "network_active_connection": [
+                "/org/freedesktop/NetworkManager/ActiveConnection/1",
+                "/org/freedesktop/NetworkManager/ActiveConnection/38",
+            ],
+            "network_connection_settings": [
+                "/org/freedesktop/NetworkManager/Settings/1",
+                "/org/freedesktop/NetworkManager/Settings/38",
+            ],
             "network_device_wireless": None,
             "network_device": [
                 "/org/freedesktop/NetworkManager/Devices/1",
                 "/org/freedesktop/NetworkManager/Devices/3",
+                "/org/freedesktop/NetworkManager/Devices/38",
             ],
+            "network_device_vlan": None,
             "network_dns_manager": None,
             "network_ip4config": None,
             "network_ip6config": None,
@@ -219,12 +249,32 @@ async def network_manager_service(
     yield network_manager_services["network_manager"]
 
 
+@pytest.fixture
+async def dns_manager_service(
+    network_manager_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]],
+) -> AsyncGenerator[DnsManagerService]:
+    """Return DNS Manager service mock."""
+    yield network_manager_services["network_dns_manager"]
+
+
+@pytest.fixture(name="active_connection_service")
+async def fixture_active_connection_service(
+    network_manager_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]],
+) -> ActiveConnectionService:
+    """Return mock active connection service."""
+    yield network_manager_services["network_active_connection"][
+        DEFAULT_ACTIVE_CONNECTION_OBJECT_PATH
+    ]
+
+
 @pytest.fixture(name="connection_settings_service")
 async def fixture_connection_settings_service(
     network_manager_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]],
 ) -> ConnectionSettingsService:
     """Return mock connection settings service."""
-    yield network_manager_services["network_connection_settings"]
+    yield network_manager_services["network_connection_settings"][
+        DEFAULT_CONNECTION_SETTINGS_OBJECT_PATH
+    ]
 
 
 @pytest.fixture(name="udisks2_services")
@@ -376,6 +426,7 @@ async def coresys(
 
     # Mock docker
     coresys_obj._docker = docker
+    coresys_obj.docker.coresys = coresys_obj
     coresys_obj.docker._monitor = DockerMonitor(coresys_obj)
 
     # Set internet state
@@ -408,7 +459,7 @@ async def coresys(
         coresys_obj.init_websession = AsyncMock()
 
     # Don't remove files/folders related to addons and stores
-    with patch("supervisor.store.git.GitRepo._remove"):
+    with patch("supervisor.store.git.GitRepo.remove"):
         yield coresys_obj
 
     await coresys_obj.dbus.unload()
@@ -445,6 +496,7 @@ async def tmp_supervisor_data(coresys: CoreSys, tmp_path: Path) -> Path:
         coresys.config.path_addon_configs.mkdir(parents=True)
         coresys.config.path_ssl.mkdir()
         coresys.config.path_core_backup.mkdir(parents=True)
+        coresys.config.path_cid_files.mkdir()
         yield tmp_path
 
 
@@ -462,12 +514,27 @@ async def journald_gateway() -> AsyncGenerator[MagicMock]:
             return (await client_response.content.read()).decode("utf-8")
 
         client_response.text = response_text
+        client_response.status = 200
 
         get.return_value.__aenter__.return_value = client_response
         get.return_value.__aenter__.return_value.__aenter__.return_value = (
             client_response
         )
         yield client_response
+
+
+@pytest.fixture
+async def without_journal_gatewayd_boots() -> AsyncGenerator[MagicMock]:
+    """Make method using /boots of systemd-journald-gateway fail."""
+
+    def raise_host_log_error_side_effect(*args, **kwargs):
+        raise HostLogError("Mocked error")
+
+    with patch(
+        "supervisor.host.logs.LogsControl._get_boot_ids_native"
+    ) as get_boot_ids_native:
+        get_boot_ids_native.side_effect = raise_host_log_error_side_effect
+        yield get_boot_ids_native
 
 
 @pytest.fixture
@@ -566,7 +633,7 @@ def run_supervisor_state(request: pytest.FixtureRequest) -> Generator[MagicMock]
 
 
 @pytest.fixture
-def store_addon(coresys: CoreSys, tmp_path, repository):
+def store_addon(coresys: CoreSys, tmp_path, test_repository):
     """Store add-on fixture."""
     addon_obj = AddonStore(coresys, "test_store_addon")
 
@@ -579,23 +646,16 @@ def store_addon(coresys: CoreSys, tmp_path, repository):
 
 
 @pytest.fixture
-async def repository(coresys: CoreSys):
-    """Repository fixture."""
-    coresys.store._data[ATTR_REPOSITORIES].remove(
-        "https://github.com/hassio-addons/repository"
-    )
-    coresys.store._data[ATTR_REPOSITORIES].remove(
-        "https://github.com/esphome/home-assistant-addon"
-    )
+async def test_repository(coresys: CoreSys):
+    """Test add-on store repository fixture."""
     coresys.config._data[ATTR_ADDONS_CUSTOM_LIST] = []
 
     with (
-        patch("supervisor.store.validate.BUILTIN_REPOSITORIES", {"local", "core"}),
         patch("supervisor.store.git.GitRepo.load", return_value=None),
     ):
         await coresys.store.load()
 
-        repository_obj = Repository(
+        repository_obj = Repository.create(
             coresys, "https://github.com/awesome-developer/awesome-repo"
         )
 
@@ -608,7 +668,7 @@ async def repository(coresys: CoreSys):
 
 
 @pytest.fixture
-async def install_addon_ssh(coresys: CoreSys, repository):
+async def install_addon_ssh(coresys: CoreSys, test_repository):
     """Install local_ssh add-on."""
     store = coresys.addons.store[TEST_ADDON_SLUG]
     await coresys.addons.data.install(store)
@@ -620,7 +680,7 @@ async def install_addon_ssh(coresys: CoreSys, repository):
 
 
 @pytest.fixture
-async def install_addon_example(coresys: CoreSys, repository):
+async def install_addon_example(coresys: CoreSys, test_repository):
     """Install local_example add-on."""
     store = coresys.addons.store["local_example"]
     await coresys.addons.data.install(store)
@@ -747,22 +807,12 @@ async def capture_exception() -> Mock:
 
 
 @pytest.fixture
-async def capture_event() -> Mock:
-    """Mock capture event for testing."""
-    with (
-        patch("supervisor.utils.sentry.sentry_sdk.is_initialized", return_value=True),
-        patch("supervisor.utils.sentry.sentry_sdk.capture_event") as capture_event,
-    ):
-        yield capture_event
-
-
-@pytest.fixture
 async def os_available(request: pytest.FixtureRequest) -> None:
     """Mock os as available."""
     version = (
         AwesomeVersion(request.param)
         if hasattr(request, "param")
-        else AwesomeVersion("10.2")
+        else AwesomeVersion("16.2")
     )
     with (
         patch.object(OSManager, "available", new=PropertyMock(return_value=True)),
@@ -796,8 +846,6 @@ async def container(docker: DockerAPI) -> MagicMock:
     """Mock attrs and status for container on attach."""
     docker.containers.get.return_value = addon = MagicMock()
     docker.containers.create.return_value = addon
-    docker.images.pull.return_value = addon
-    docker.images.build.return_value = (addon, "")
     addon.status = "stopped"
     addon.attrs = {"State": {"ExitCode": 0}}
     yield addon

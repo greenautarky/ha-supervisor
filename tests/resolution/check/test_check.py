@@ -21,10 +21,6 @@ def fixture_mock_dns_query():
             "supervisor.resolution.checks.dns_server.DNSResolver.query",
             new_callable=AsyncMock,
         ),
-        patch(
-            "supervisor.resolution.checks.dns_server_ipv6.DNSResolver.query",
-            new_callable=AsyncMock,
-        ),
     ):
         yield
 
@@ -55,7 +51,6 @@ async def test_if_check_make_issue(coresys: CoreSys):
     """Test check for setup."""
     free_space = Issue(IssueType.FREE_SPACE, ContextType.SYSTEM)
     await coresys.core.set_state(CoreState.RUNNING)
-    coresys.security.content_trust = False
 
     with patch("shutil.disk_usage", return_value=(1, 1, 1)):
         await coresys.resolution.check.check_system()
@@ -67,14 +62,13 @@ async def test_if_check_cleanup_issue(coresys: CoreSys):
     """Test check for setup."""
     free_space = Issue(IssueType.FREE_SPACE, ContextType.SYSTEM)
     await coresys.core.set_state(CoreState.RUNNING)
-    coresys.security.content_trust = False
 
     with patch("shutil.disk_usage", return_value=(1, 1, 1)):
         await coresys.resolution.check.check_system()
 
     assert free_space in coresys.resolution.issues
 
-    with patch("shutil.disk_usage", return_value=(42, 42, 2 * (1024.0**3))):
+    with patch("shutil.disk_usage", return_value=(42, 42, 3 * (1024.0**3))):
         await coresys.resolution.check.check_system()
 
     assert free_space not in coresys.resolution.issues

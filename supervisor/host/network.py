@@ -5,14 +5,16 @@ from contextlib import suppress
 import logging
 from typing import Any
 
+from supervisor.utils.sentry import async_capture_exception
+
 from ..const import ATTR_HOST_INTERNET
 from ..coresys import CoreSys, CoreSysAttributes
 from ..dbus.const import (
+    DBUS_ATTR_CONFIGURATION,
     DBUS_ATTR_CONNECTION_ENABLED,
     DBUS_ATTR_CONNECTIVITY,
-    DBUS_ATTR_PRIMARY_CONNECTION,
+    DBUS_IFACE_DNS,
     DBUS_IFACE_NM,
-    DBUS_OBJECT_BASE,
     DBUS_SIGNAL_NM_CONNECTION_ACTIVE_CHANGED,
     ConnectionStateType,
     ConnectivityState,
@@ -20,7 +22,6 @@ from ..dbus.const import (
     WirelessMethodType,
 )
 from ..dbus.network.connection import NetworkConnection
-from ..dbus.network.interface import NetworkInterface
 from ..dbus.network.setting.generate import get_connection_from_interface
 from ..exceptions import (
     DBusError,
@@ -46,6 +47,8 @@ class NetworkManager(CoreSysAttributes):
         """Initialize system center handling."""
         self.coresys: CoreSys = coresys
         self._connectivity: bool | None = None
+        # No event need on initial change (NetworkManager initializes with empty list)
+        self._dns_configuration: list = []
 
     @property
     def connectivity(self) -> bool | None:
@@ -82,14 +85,24 @@ class NetworkManager(CoreSysAttributes):
     @property
     def dns_servers(self) -> list[str]:
         """Return a list of local DNS servers."""
-        # Read all local dns servers
-        servers: list[str] = []
+        # Read all local dns servers with priority for stable ordering
+        servers_with_priority: list[tuple[int, str]] = []
         for config in self.sys_dbus.network.dns.configuration:
             if config.vpn or not config.nameservers:
                 continue
-            servers.extend(config.nameservers)
+            for ns in config.nameservers:
+                servers_with_priority.append((config.priority, str(ns)))
 
-        return list(dict.fromkeys(servers))
+        # Sort by priority (ascending) then by server address for stable ordering
+        # Remove duplicates while preserving the highest priority (lowest number)
+        seen_servers: set[str] = set()
+        unique_servers: list[str] = []
+        for _, server in sorted(servers_with_priority):
+            if server not in seen_servers:
+                seen_servers.add(server)
+                unique_servers.append(server)
+
+        return unique_servers
 
     async def check_connectivity(self, *, force: bool = False):
         """Check the internet connection."""
@@ -138,8 +151,12 @@ class NetworkManager(CoreSysAttributes):
                 ]
             )
 
-        self.sys_dbus.network.dbus.properties.on_properties_changed(
-            self._check_connectivity_changed
+        self.sys_dbus.network.dbus.properties.on(
+            "properties_changed", self._check_connectivity_changed
+        )
+
+        self.sys_dbus.network.dns.dbus.properties.on(
+            "properties_changed", self._check_dns_changed
         )
 
     async def _check_connectivity_changed(
@@ -151,15 +168,6 @@ class NetworkManager(CoreSysAttributes):
 
         connectivity_check: bool | None = changed.get(DBUS_ATTR_CONNECTION_ENABLED)
         connectivity: int | None = changed.get(DBUS_ATTR_CONNECTIVITY)
-
-        # This potentially updated the DNS configuration. Make sure the DNS plug-in
-        # picks up the latest settings.
-        if (
-            DBUS_ATTR_PRIMARY_CONNECTION in changed
-            and changed[DBUS_ATTR_PRIMARY_CONNECTION]
-            and changed[DBUS_ATTR_PRIMARY_CONNECTION] != DBUS_OBJECT_BASE
-        ):
-            await self.sys_plugins.dns.restart()
 
         if (
             connectivity_check is True
@@ -173,6 +181,20 @@ class NetworkManager(CoreSysAttributes):
 
         elif connectivity is not None:
             self.connectivity = connectivity == ConnectivityState.CONNECTIVITY_FULL
+
+    async def _check_dns_changed(
+        self, interface: str, changed: dict[str, Any], invalidated: list[str]
+    ):
+        """Check if DNS properties have changed."""
+        if interface != DBUS_IFACE_DNS:
+            return
+
+        if (
+            DBUS_ATTR_CONFIGURATION in changed
+            and self._dns_configuration != changed[DBUS_ATTR_CONFIGURATION]
+        ):
+            self._dns_configuration = changed[DBUS_ATTR_CONFIGURATION]
+            self.sys_plugins.dns.notify_locals_changed()
 
     async def update(self, *, force_connectivity_check: bool = False):
         """Update properties over dbus."""
@@ -188,18 +210,57 @@ class NetworkManager(CoreSysAttributes):
 
         await self.check_connectivity(force=force_connectivity_check)
 
+    async def create_vlan(self, interface: Interface) -> None:
+        """Create a VLAN interface."""
+        if interface.vlan is None:
+            raise RuntimeError("VLAN information is missing")
+        # For VLAN interfaces, check if one already exists with same ID on same parent
+        try:
+            self.sys_dbus.network.get(interface.name)
+        except NetworkInterfaceNotFound:
+            _LOGGER.debug(
+                "VLAN interface %s does not exist, creating it", interface.name
+            )
+        else:
+            raise HostNetworkError(
+                f"VLAN {interface.vlan.id} already exists on interface {interface.vlan.interface}",
+                _LOGGER.error,
+            )
+
+        settings = get_connection_from_interface(interface, self.sys_dbus.network)
+
+        try:
+            await self.sys_dbus.network.settings.add_connection(settings)
+        except DBusError as err:
+            raise HostNetworkError(
+                f"Can't create new interface: {err}", _LOGGER.error
+            ) from err
+
+        await self.update(force_connectivity_check=True)
+
     async def apply_changes(
         self, interface: Interface, *, update_only: bool = False
     ) -> None:
         """Apply Interface changes to host."""
-        inet: NetworkInterface | None = None
-        with suppress(NetworkInterfaceNotFound):
+        try:
             inet = self.sys_dbus.network.get(interface.name)
+        except NetworkInterfaceNotFound as err:
+            # The API layer (or anybody else) should not pass any updates for
+            # non-existing interfaces.
+            await async_capture_exception(err)
+            raise HostNetworkError(
+                "Requested Network interface update is not possible", _LOGGER.warning
+            ) from err
 
-        con: NetworkConnection = None
+        con: NetworkConnection | None = None
 
         # Update exist configuration
-        if inet and interface.equals_dbus_interface(inet) and interface.enabled:
+        if (
+            inet.settings
+            and inet.settings.connection
+            and interface.equals_dbus_interface(inet)
+            and interface.enabled
+        ):
             _LOGGER.debug("Updating existing configuration for %s", interface.name)
             settings = get_connection_from_interface(
                 interface,
@@ -210,12 +271,12 @@ class NetworkManager(CoreSysAttributes):
 
             try:
                 await inet.settings.update(settings)
-                con = await self.sys_dbus.network.activate_connection(
+                con = activated = await self.sys_dbus.network.activate_connection(
                     inet.settings.object_path, inet.object_path
                 )
                 _LOGGER.debug(
                     "activate_connection returns %s",
-                    con.object_path,
+                    activated.object_path,
                 )
             except DBusError as err:
                 raise HostNetworkError(
@@ -230,17 +291,21 @@ class NetworkManager(CoreSysAttributes):
             )
 
         # Create new configuration and activate interface
-        elif inet and interface.enabled:
+        elif interface.enabled:
             _LOGGER.debug("Create new configuration for %s", interface.name)
             settings = get_connection_from_interface(interface, self.sys_dbus.network)
 
             try:
-                settings, con = await self.sys_dbus.network.add_and_activate_connection(
+                (
+                    settings,
+                    activated,
+                ) = await self.sys_dbus.network.add_and_activate_connection(
                     settings, inet.object_path
                 )
+                con = activated
                 _LOGGER.debug(
                     "add_and_activate_connection returns %s",
-                    con.object_path,
+                    activated.object_path,
                 )
             except DBusError as err:
                 raise HostNetworkError(
@@ -249,7 +314,7 @@ class NetworkManager(CoreSysAttributes):
                 ) from err
 
         # Remove config from interface
-        elif inet and not interface.enabled:
+        elif not interface.enabled:
             if not inet.settings:
                 _LOGGER.debug("Interface %s is already disabled.", interface.name)
                 return
@@ -260,23 +325,13 @@ class NetworkManager(CoreSysAttributes):
                     f"Can't disable interface {interface.name}: {err}", _LOGGER.error
                 ) from err
 
-        # Create new interface (like vlan)
-        elif not inet:
-            settings = get_connection_from_interface(interface, self.sys_dbus.network)
-
-            try:
-                await self.sys_dbus.network.settings.add_connection(settings)
-            except DBusError as err:
-                raise HostNetworkError(
-                    f"Can't create new interface: {err}", _LOGGER.error
-                ) from err
         else:
             raise HostNetworkError(
                 "Requested Network interface update is not possible", _LOGGER.warning
             )
 
         if con:
-            async with con.dbus.signal(
+            async with con.connected_dbus.signal(
                 DBUS_SIGNAL_NM_CONNECTION_ACTIVE_CHANGED
             ) as signal:
                 # From this point we monitor signals. However, it might be that
@@ -302,7 +357,7 @@ class NetworkManager(CoreSysAttributes):
         """Scan on Interface for AccessPoint."""
         inet = self.sys_dbus.network.get(interface.name)
 
-        if inet.type != DeviceType.WIRELESS:
+        if inet.type != DeviceType.WIRELESS or not inet.wireless:
             raise HostNotSupportedError(
                 f"Can only scan with wireless card - {interface.name}", _LOGGER.error
             )

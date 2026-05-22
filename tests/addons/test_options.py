@@ -129,6 +129,64 @@ def test_complex_schema_dict(coresys):
         )({"name": "Pascal", "password": "1234", "extend": "test"})
 
 
+def test_complex_schema_dict_and_list(coresys):
+    """Test with complex dict/list nested schema."""
+    assert AddonOptions(
+        coresys,
+        {
+            "name": "str",
+            "packages": [
+                {
+                    "name": "str",
+                    "options": {"optional": "bool"},
+                    "dependencies": [{"name": "str"}],
+                }
+            ],
+        },
+        MOCK_ADDON_NAME,
+        MOCK_ADDON_SLUG,
+    )(
+        {
+            "name": "Pascal",
+            "packages": [
+                {
+                    "name": "core",
+                    "options": {"optional": False},
+                    "dependencies": [{"name": "supervisor"}, {"name": "audio"}],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(vol.error.Invalid):
+        assert AddonOptions(
+            coresys,
+            {
+                "name": "str",
+                "packages": [
+                    {
+                        "name": "str",
+                        "options": {"optional": "bool"},
+                        "dependencies": [{"name": "str"}],
+                    }
+                ],
+            },
+            MOCK_ADDON_NAME,
+            MOCK_ADDON_SLUG,
+        )(
+            {
+                "name": "Pascal",
+                "packages": [
+                    {
+                        "name": "core",
+                        "options": {"optional": False},
+                        "dependencies": [{"name": "supervisor"}, "wrong"],
+                    }
+                ],
+            }
+        )
+
+
 def test_simple_device_schema(coresys):
     """Test with simple schema."""
     for device in (
@@ -175,12 +233,13 @@ def test_simple_device_schema(coresys):
     ):
         coresys.hardware.update_device(device)
 
-    assert AddonOptions(
+    data_device_path = AddonOptions(
         coresys,
         {"name": "str", "password": "password", "input": "device"},
         MOCK_ADDON_NAME,
         MOCK_ADDON_SLUG,
     )({"name": "Pascal", "password": "1234", "input": "/dev/ttyUSB0"})
+    assert data_device_path["input"] == "/dev/ttyUSB0"
 
     data = AddonOptions(
         coresys,
@@ -188,7 +247,7 @@ def test_simple_device_schema(coresys):
         MOCK_ADDON_NAME,
         MOCK_ADDON_SLUG,
     )({"name": "Pascal", "password": "1234", "input": "/dev/serial/by-id/xyx"})
-    assert data["input"] == "/dev/ttyUSB0"
+    assert data["input"] == "/dev/serial/by-id/xyx"
 
     assert AddonOptions(
         coresys,

@@ -12,7 +12,7 @@ from supervisor.addons.addon import Addon
 from supervisor.arch import CpuArch
 from supervisor.backups.manager import BackupManager
 from supervisor.coresys import CoreSys
-from supervisor.exceptions import AddonsNotSupportedError, StoreJobError
+from supervisor.exceptions import AddonNotSupportedError, StoreJobError
 from supervisor.homeassistant.module import HomeAssistant
 from supervisor.store import StoreManager
 from supervisor.store.addon import AddonStore
@@ -32,7 +32,8 @@ async def test_default_load(coresys: CoreSys):
         refresh_cache_calls.add(obj.slug)
 
     with (
-        patch("supervisor.store.repository.Repository.load", return_value=None),
+        patch("supervisor.store.repository.RepositoryGit.load", return_value=None),
+        patch("supervisor.store.repository.RepositoryLocal.load", return_value=None),
         patch.object(type(coresys.config), "addons_repositories", return_value=[]),
         patch("pathlib.Path.exists", return_value=True),
         patch.object(AddonStore, "refresh_path_cache", new=mock_refresh_cache),
@@ -80,9 +81,13 @@ async def test_load_with_custom_repository(coresys: CoreSys):
         store_manager = await StoreManager(coresys).load_config()
 
     with (
-        patch("supervisor.store.repository.Repository.load", return_value=None),
+        patch("supervisor.store.repository.RepositoryGit.load", return_value=None),
+        patch("supervisor.store.repository.RepositoryLocal.load", return_value=None),
         patch.object(type(coresys.config), "addons_repositories", return_value=[]),
-        patch("supervisor.store.repository.Repository.validate", return_value=True),
+        patch("supervisor.store.repository.RepositoryGit.validate", return_value=True),
+        patch(
+            "supervisor.store.repository.RepositoryLocal.validate", return_value=True
+        ),
         patch("pathlib.Path.exists", return_value=True),
         patch.object(AddonStore, "refresh_path_cache", new=mock_refresh_cache),
     ):
@@ -165,9 +170,9 @@ async def test_update_unavailable_addon(
             "version",
             new=PropertyMock(return_value=AwesomeVersion("2022.1.1")),
         ),
-        patch("shutil.disk_usage", return_value=(42, 42, (1024.0**3))),
+        patch("shutil.disk_usage", return_value=(42, 42, (5120.0**3))),
     ):
-        with pytest.raises(AddonsNotSupportedError):
+        with pytest.raises(AddonNotSupportedError):
             await coresys.addons.update("local_ssh", backup=True)
 
         backup.assert_not_called()
@@ -198,7 +203,7 @@ async def test_update_unavailable_addon(
 )
 async def test_install_unavailable_addon(
     coresys: CoreSys,
-    repository: Repository,
+    test_repository: Repository,
     caplog: pytest.LogCaptureFixture,
     config: dict[str, Any],
     log: str,
@@ -221,8 +226,8 @@ async def test_install_unavailable_addon(
             "version",
             new=PropertyMock(return_value=AwesomeVersion("2022.1.1")),
         ),
-        patch("shutil.disk_usage", return_value=(42, 42, (1024.0**3))),
-        pytest.raises(AddonsNotSupportedError),
+        patch("shutil.disk_usage", return_value=(42, 42, (5120.0**3))),
+        pytest.raises(AddonNotSupportedError),
     ):
         await coresys.addons.install("local_ssh")
 

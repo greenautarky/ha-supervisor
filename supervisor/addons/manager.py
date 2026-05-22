@@ -12,14 +12,15 @@ from attr import evolve
 from ..const import AddonBoot, AddonStartup, AddonState
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import (
+    AddonNotSupportedError,
     AddonsError,
     AddonsJobError,
-    AddonsNotSupportedError,
     CoreDNSError,
     DockerError,
     HassioError,
-    HomeAssistantAPIError,
 )
+from ..jobs import ChildJobSyncFilter
+from ..jobs.const import JobConcurrency
 from ..jobs.decorator import Job, JobCondition
 from ..resolution.const import ContextType, IssueType, SuggestionType
 from ..store.addon import AddonStore
@@ -66,6 +67,10 @@ class AddonManager(CoreSysAttributes):
         if not local_only:
             return self.store.get(addon_slug)
         return None
+
+    def get_local_only(self, addon_slug: str) -> Addon | None:
+        """Return an installed add-on from slug."""
+        return self.local.get(addon_slug)
 
     def from_token(self, token: str) -> Addon | None:
         """Return an add-on from Supervisor token."""
@@ -176,8 +181,14 @@ class AddonManager(CoreSysAttributes):
         name="addon_manager_install",
         conditions=ADDON_UPDATE_CONDITIONS,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.QUEUE,
+        child_job_syncs=[
+            ChildJobSyncFilter("docker_interface_install", progress_allocation=1.0)
+        ],
     )
-    async def install(self, slug: str) -> None:
+    async def install(
+        self, slug: str, *, validation_complete: asyncio.Event | None = None
+    ) -> None:
         """Install an add-on."""
         self.sys_jobs.current.reference = slug
 
@@ -189,6 +200,10 @@ class AddonManager(CoreSysAttributes):
             raise AddonsError(f"Add-on {slug} does not exist", _LOGGER.error)
 
         store.validate_availability()
+
+        # If being run in the background, notify caller that validation has completed
+        if validation_complete:
+            validation_complete.set()
 
         await Addon(self.coresys, slug).install()
 
@@ -217,9 +232,20 @@ class AddonManager(CoreSysAttributes):
         name="addon_manager_update",
         conditions=ADDON_UPDATE_CONDITIONS,
         on_condition=AddonsJobError,
+        # We assume for now the docker image pull is 100% of this task for progress
+        # allocation. But from a user perspective that isn't true. Other steps
+        # that take time which is not accounted for in progress include:
+        # partial backup, image cleanup, apparmor update, and addon restart
+        child_job_syncs=[
+            ChildJobSyncFilter("docker_interface_install", progress_allocation=1.0)
+        ],
     )
     async def update(
-        self, slug: str, backup: bool | None = False
+        self,
+        slug: str,
+        backup: bool | None = False,
+        *,
+        validation_complete: asyncio.Event | None = None,
     ) -> asyncio.Task | None:
         """Update add-on.
 
@@ -244,6 +270,10 @@ class AddonManager(CoreSysAttributes):
         # Check if available, Maybe something have changed
         store.validate_availability()
 
+        # If being run in the background, notify caller that validation has completed
+        if validation_complete:
+            validation_complete.set()
+
         if backup:
             await self.sys_backups.do_backup_partial(
                 name=f"addon_{addon.slug}_{addon.version}",
@@ -251,7 +281,10 @@ class AddonManager(CoreSysAttributes):
                 addons=[addon.slug],
             )
 
-        return await addon.update()
+        task = await addon.update()
+
+        _LOGGER.info("Add-on '%s' successfully updated", slug)
+        return task
 
     @Job(
         name="addon_manager_rebuild",
@@ -262,7 +295,7 @@ class AddonManager(CoreSysAttributes):
         ],
         on_condition=AddonsJobError,
     )
-    async def rebuild(self, slug: str) -> asyncio.Task | None:
+    async def rebuild(self, slug: str, *, force: bool = False) -> asyncio.Task | None:
         """Perform a rebuild of local build add-on.
 
         Returns a Task that completes when addon has state 'started' (see addon.start)
@@ -285,8 +318,8 @@ class AddonManager(CoreSysAttributes):
             raise AddonsError(
                 "Version changed, use Update instead Rebuild", _LOGGER.error
             )
-        if not addon.need_build:
-            raise AddonsNotSupportedError(
+        if not force and not addon.need_build:
+            raise AddonNotSupportedError(
                 "Can't rebuild a image based add-on", _LOGGER.error
             )
 
@@ -330,8 +363,7 @@ class AddonManager(CoreSysAttributes):
         # Update ingress
         if had_ingress != addon.ingress_panel:
             await self.sys_ingress.reload()
-            with suppress(HomeAssistantAPIError):
-                await self.sys_ingress.update_hass_panel(addon)
+            await self.sys_ingress.update_hass_panel(addon)
 
         return wait_for_start
 

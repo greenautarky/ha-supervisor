@@ -140,6 +140,46 @@ def test_valid_map():
     vd.SCHEMA_ADDON_CONFIG(config)
 
 
+def test_malformed_map_entries():
+    """Test that malformed map entries are handled gracefully (issue #6124)."""
+    config = load_json_fixture("basic-addon-config.json")
+
+    # Test case 1: Empty dict in map (should be skipped with warning)
+    config["map"] = [{}]
+    valid_config = vd.SCHEMA_ADDON_CONFIG(config)
+    assert valid_config["map"] == []
+
+    # Test case 2: Dict missing required 'type' field (should be skipped with warning)
+    config["map"] = [{"read_only": False, "path": "/custom"}]
+    valid_config = vd.SCHEMA_ADDON_CONFIG(config)
+    assert valid_config["map"] == []
+
+    # Test case 3: Invalid string format that doesn't match regex
+    config["map"] = ["invalid_format", "not:a:valid:mapping", "share:invalid_mode"]
+    valid_config = vd.SCHEMA_ADDON_CONFIG(config)
+    assert valid_config["map"] == []
+
+    # Test case 4: Mix of valid and invalid entries (invalid should be filtered out)
+    config["map"] = [
+        "share:rw",  # Valid string format
+        "invalid_string",  # Invalid string format
+        {},  # Invalid empty dict
+        {"type": "config", "read_only": True},  # Valid dict format
+        {"read_only": False},  # Invalid - missing type
+    ]
+    valid_config = vd.SCHEMA_ADDON_CONFIG(config)
+    # Should only keep the valid entries
+    assert len(valid_config["map"]) == 2
+    assert any(entry["type"] == "share" for entry in valid_config["map"])
+    assert any(entry["type"] == "config" for entry in valid_config["map"])
+
+    # Test case 5: The specific case from the UplandJacob repo (malformed YAML format)
+    # This simulates what YAML "- addon_config: rw" creates
+    config["map"] = [{"addon_config": "rw"}]  # Wrong structure, missing 'type' key
+    valid_config = vd.SCHEMA_ADDON_CONFIG(config)
+    assert valid_config["map"] == []
+
+
 def test_valid_basic_build():
     """Validate basic build config."""
     config = load_json_fixture("basic-build-config.json")
@@ -285,3 +325,165 @@ def test_valid_slug():
     config["slug"] = "complemento telefónico"
     with pytest.raises(vol.Invalid):
         assert vd.SCHEMA_ADDON_CONFIG(config)
+
+
+def test_valid_schema():
+    """Test valid and invalid addon slugs."""
+    config = load_json_fixture("basic-addon-config.json")
+
+    # Basic types
+    config["schema"] = {
+        "bool_basic": "bool",
+        "mail_basic": "email",
+        "url_basic": "url",
+        "port_basic": "port",
+        "match_basic": "match(.*@.*)",
+        "list_basic": "list(option1|option2|option3)",
+        # device
+        "device_basic": "device",
+        "device_filter": "device(subsystem=tty)",
+        # str
+        "str_basic": "str",
+        "str_basic2": "str(,)",
+        "str_min": "str(5,)",
+        "str_max": "str(,10)",
+        "str_minmax": "str(5,10)",
+        # password
+        "password_basic": "password",
+        "password_basic2": "password(,)",
+        "password_min": "password(5,)",
+        "password_max": "password(,10)",
+        "password_minmax": "password(5,10)",
+        # int
+        "int_basic": "int",
+        "int_basic2": "int(,)",
+        "int_min": "int(5,)",
+        "int_max": "int(,10)",
+        "int_minmax": "int(5,10)",
+        # float
+        "float_basic": "float",
+        "float_basic2": "float(,)",
+        "float_min": "float(5,)",
+        "float_max": "float(,10)",
+        "float_minmax": "float(5,10)",
+    }
+    assert vd.SCHEMA_ADDON_CONFIG(config)
+
+    # Different valid ways of nesting dicts and lists
+    config["schema"] = {
+        "str_list": ["str"],
+        "dict_in_list": [
+            {
+                "required": "str",
+                "optional": "str?",
+            }
+        ],
+        "dict": {
+            "required": "str",
+            "optional": "str?",
+            "str_list_in_dict": ["str"],
+            "dict_in_list_in_dict": [
+                {
+                    "required": "str",
+                    "optional": "str?",
+                    "str_list_in_dict_in_list_in_dict": ["str"],
+                }
+            ],
+            "dict_in_dict": {
+                "str_list_in_dict_in_dict": ["str"],
+                "dict_in_list_in_dict_in_dict": [
+                    {
+                        "required": "str",
+                        "optional": "str?",
+                    }
+                ],
+                "dict_in_dict_in_dict": {
+                    "required": "str",
+                    "optional": "str",
+                },
+            },
+        },
+    }
+    assert vd.SCHEMA_ADDON_CONFIG(config)
+
+    # List nested within dict within list
+    config["schema"] = {"field": [{"subfield": ["str"]}]}
+    assert vd.SCHEMA_ADDON_CONFIG(config)
+
+    # No lists directly nested within each other
+    config["schema"] = {"field": [["str"]]}
+    with pytest.raises(vol.Invalid):
+        assert vd.SCHEMA_ADDON_CONFIG(config)
+
+    # Field types must be valid
+    config["schema"] = {"field": "invalid"}
+    with pytest.raises(vol.Invalid):
+        assert vd.SCHEMA_ADDON_CONFIG(config)
+
+
+def test_ulimits_simple_format():
+    """Test ulimits simple format validation."""
+    config = load_json_fixture("basic-addon-config.json")
+
+    config["ulimits"] = {"nofile": 65535, "nproc": 32768, "memlock": 134217728}
+
+    valid_config = vd.SCHEMA_ADDON_CONFIG(config)
+    assert valid_config["ulimits"]["nofile"] == 65535
+    assert valid_config["ulimits"]["nproc"] == 32768
+    assert valid_config["ulimits"]["memlock"] == 134217728
+
+
+def test_ulimits_detailed_format():
+    """Test ulimits detailed format validation."""
+    config = load_json_fixture("basic-addon-config.json")
+
+    config["ulimits"] = {
+        "nofile": {"soft": 20000, "hard": 40000},
+        "nproc": 32768,  # Mixed format should work
+        "memlock": {"soft": 67108864, "hard": 134217728},
+    }
+
+    valid_config = vd.SCHEMA_ADDON_CONFIG(config)
+    assert valid_config["ulimits"]["nofile"]["soft"] == 20000
+    assert valid_config["ulimits"]["nofile"]["hard"] == 40000
+    assert valid_config["ulimits"]["nproc"] == 32768
+    assert valid_config["ulimits"]["memlock"]["soft"] == 67108864
+    assert valid_config["ulimits"]["memlock"]["hard"] == 134217728
+
+
+def test_ulimits_empty_dict():
+    """Test ulimits with empty dict (default)."""
+    config = load_json_fixture("basic-addon-config.json")
+
+    valid_config = vd.SCHEMA_ADDON_CONFIG(config)
+    assert valid_config["ulimits"] == {}
+
+
+def test_ulimits_invalid_values():
+    """Test ulimits with invalid values."""
+    config = load_json_fixture("basic-addon-config.json")
+
+    # Invalid string values
+    config["ulimits"] = {"nofile": "invalid"}
+    with pytest.raises(vol.Invalid):
+        vd.SCHEMA_ADDON_CONFIG(config)
+
+    # Invalid detailed format
+    config["ulimits"] = {"nofile": {"invalid_key": 1000}}
+    with pytest.raises(vol.Invalid):
+        vd.SCHEMA_ADDON_CONFIG(config)
+
+    # Missing hard value in detailed format
+    config["ulimits"] = {"nofile": {"soft": 1000}}
+    with pytest.raises(vol.Invalid):
+        vd.SCHEMA_ADDON_CONFIG(config)
+
+    # Missing soft value in detailed format
+    config["ulimits"] = {"nofile": {"hard": 1000}}
+    with pytest.raises(vol.Invalid):
+        vd.SCHEMA_ADDON_CONFIG(config)
+
+    # Empty dict in detailed format
+    config["ulimits"] = {"nofile": {}}
+    with pytest.raises(vol.Invalid):
+        vd.SCHEMA_ADDON_CONFIG(config)

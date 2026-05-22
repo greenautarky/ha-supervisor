@@ -27,7 +27,7 @@ from .ip_configuration import IpConfiguration
 class NetworkConnection(DBusInterfaceProxy):
     """Active network connection object for Network Manager.
 
-    https://developer.gnome.org/NetworkManager/stable/gdbus-org.freedesktop.NetworkManager.Connection.Active.html
+    https://networkmanager.dev/docs/api/latest/gdbus-org.freedesktop.NetworkManager.Connection.Active.html
     """
 
     bus_name: str = DBUS_NAME_NM
@@ -69,7 +69,7 @@ class NetworkConnection(DBusInterfaceProxy):
     @dbus_property
     def state(self) -> ConnectionStateType:
         """Return the state of the connection."""
-        return self.properties[DBUS_ATTR_STATE]
+        return ConnectionStateType(self.properties[DBUS_ATTR_STATE])
 
     @property
     def state_flags(self) -> set[ConnectionStateFlags]:
@@ -96,7 +96,7 @@ class NetworkConnection(DBusInterfaceProxy):
 
     @ipv4.setter
     def ipv4(self, ipv4: IpConfiguration | None) -> None:
-        """Set ipv4 configuration."""
+        """Set IPv4 configuration."""
         if self._ipv4 and self._ipv4 is not ipv4:
             self._ipv4.shutdown()
 
@@ -109,7 +109,7 @@ class NetworkConnection(DBusInterfaceProxy):
 
     @ipv6.setter
     def ipv6(self, ipv6: IpConfiguration | None) -> None:
-        """Set ipv6 configuration."""
+        """Set IPv6 configuration."""
         if self._ipv6 and self._ipv6 is not ipv6:
             self._ipv6.shutdown()
 

@@ -3,7 +3,6 @@
 import asyncio
 from functools import partial
 import logging
-from typing import Any
 
 from aiohttp.web_exceptions import HTTPBadGateway, HTTPServiceUnavailable
 import sentry_sdk
@@ -13,6 +12,7 @@ from sentry_sdk.integrations.dedupe import DedupeIntegration
 from sentry_sdk.integrations.excepthook import ExcepthookIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.integrations.threading import ThreadingIntegration
+from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
 
 from ..const import SUPERVISOR_VERSION
 from ..coresys import CoreSys
@@ -27,6 +27,7 @@ def init_sentry(coresys: CoreSys) -> None:
     """Initialize sentry client."""
     if not sentry_sdk.is_initialized():
         _LOGGER.info("Initializing Supervisor Sentry")
+        denylist = DEFAULT_DENYLIST + ["psk", "ssid"]
         # Don't use AsyncioIntegration(). We commonly handle task exceptions
         # outside of tasks. This would cause exception we gracefully handle to
         # be captured by sentry.
@@ -35,6 +36,7 @@ def init_sentry(coresys: CoreSys) -> None:
             before_send=partial(filter_data, coresys),
             auto_enabling_integrations=False,
             default_integrations=False,
+            event_scrubber=EventScrubber(denylist=denylist),
             integrations=[
                 AioHttpIntegration(
                     failed_request_status_codes=frozenset(range(500, 600))
@@ -56,29 +58,7 @@ def init_sentry(coresys: CoreSys) -> None:
         )
 
 
-def capture_event(event: dict[str, Any], only_once: str | None = None):
-    """Capture an event and send to sentry.
-
-    Must be called in executor.
-    """
-    if sentry_sdk.is_initialized():
-        if only_once and only_once not in only_once_events:
-            only_once_events.add(only_once)
-            sentry_sdk.capture_event(event)
-
-
-async def async_capture_event(event: dict[str, Any], only_once: str | None = None):
-    """Capture an event and send to sentry.
-
-    Safe to call from event loop.
-    """
-    if sentry_sdk.is_initialized():
-        await asyncio.get_running_loop().run_in_executor(
-            None, capture_event, event, only_once
-        )
-
-
-def capture_exception(err: Exception) -> None:
+def capture_exception(err: BaseException) -> None:
     """Capture an exception and send to sentry.
 
     Must be called in executor.
@@ -87,7 +67,7 @@ def capture_exception(err: Exception) -> None:
         sentry_sdk.capture_exception(err)
 
 
-async def async_capture_exception(err: Exception) -> None:
+async def async_capture_exception(err: BaseException) -> None:
     """Capture an exception and send to sentry.
 
     Safe to call in event loop.

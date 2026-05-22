@@ -28,7 +28,7 @@ from .homeassistant.core import LANDINGPAGE
 from .resolution.const import ContextType, IssueType, SuggestionType, UnhealthyReason
 from .utils.dt import utcnow
 from .utils.sentry import async_capture_exception
-from .utils.whoami import WhoamiData, retrieve_whoami
+from .utils.whoami import retrieve_whoami
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 class Core(CoreSysAttributes):
     """Main object of Supervisor."""
 
-    def __init__(self, coresys: CoreSys):
+    def __init__(self, coresys: CoreSys) -> None:
         """Initialize Supervisor object."""
         self.coresys: CoreSys = coresys
         self._state: CoreState = CoreState.INITIALIZE
@@ -91,7 +91,7 @@ class Core(CoreSysAttributes):
                     "info", {"state": self._state}
                 )
 
-    async def connect(self):
+    async def connect(self) -> None:
         """Connect Supervisor container."""
         # Load information from container
         await self.sys_supervisor.load()
@@ -120,7 +120,7 @@ class Core(CoreSysAttributes):
         self.sys_config.version = self.sys_supervisor.version
         await self.sys_config.save_data()
 
-    async def setup(self):
+    async def setup(self) -> None:
         """Start setting up supervisor orchestration."""
         await self.set_state(CoreState.SETUP)
 
@@ -150,6 +150,8 @@ class Core(CoreSysAttributes):
             self.sys_dbus.load(),
             # Load Host
             self.sys_host.load(),
+            # Load HassOS
+            self.sys_os.load(),
             # Adjust timezone / time settings
             self._adjust_system_datetime(),
             # Load mounts
@@ -164,8 +166,6 @@ class Core(CoreSysAttributes):
             self.sys_homeassistant.load(),
             # Load CPU/Arch
             self.sys_arch.load(),
-            # Load HassOS
-            self.sys_os.load(),
             # Load Stores
             self.sys_store.load(),
             # Load Add-ons
@@ -188,34 +188,27 @@ class Core(CoreSysAttributes):
                 await setup_task
             except Exception as err:  # pylint: disable=broad-except
                 _LOGGER.critical(
-                    "Fatal error happening on load Task %s: %s", setup_task, err
+                    "Fatal error happening on load Task %s: %s",
+                    setup_task,
+                    err,
+                    exc_info=True,
                 )
                 self.sys_resolution.add_unhealthy_reason(UnhealthyReason.SETUP)
                 await async_capture_exception(err)
 
-        # Set OS Agent diagnostics if needed
-        if (
-            self.sys_config.diagnostics is not None
-            and self.sys_dbus.agent.diagnostics != self.sys_config.diagnostics
-            and not self.sys_dev
-            and self.supported
-        ):
-            try:
-                await self.sys_dbus.agent.set_diagnostics(self.sys_config.diagnostics)
-            except Exception as err:  # pylint: disable=broad-except
-                _LOGGER.warning(
-                    "Could not set diagnostics to %s due to %s",
-                    self.sys_config.diagnostics,
-                    err,
-                )
-                await async_capture_exception(err)
-
-        # Evaluate the system
-        await self.sys_resolution.evaluate.evaluate_system()
-
-    async def start(self):
+    async def start(self) -> None:
         """Start Supervisor orchestration."""
         await self.set_state(CoreState.STARTUP)
+
+        # Set OS Agent diagnostics if needed
+        if (
+            self.sys_dbus.agent.is_connected
+            and self.sys_config.diagnostics is not None
+            and self.sys_dbus.agent.diagnostics != self.sys_config.diagnostics
+            and self.supported
+        ):
+            _LOGGER.debug("Set OS Agent diagnostics to %s", self.sys_config.diagnostics)
+            await self.sys_dbus.agent.set_diagnostics(self.sys_config.diagnostics)
 
         # Check if system is healthy
         if not self.supported:
@@ -228,6 +221,9 @@ class Core(CoreSysAttributes):
         # Mark booted partition as healthy
         await self.sys_os.mark_healthy()
 
+        # Refresh update information
+        await self.sys_updater.reload()
+
         # On release channel, try update itself if auto update enabled
         if self.sys_supervisor.need_update and self.sys_updater.auto_update:
             if not self.healthy:
@@ -237,10 +233,10 @@ class Core(CoreSysAttributes):
                     await self.sys_supervisor.update()
                     return
 
-        # Start addon mark as initialize
-        await self.sys_addons.boot(AddonStartup.INITIALIZE)
-
         try:
+            # Start addon mark as initialize
+            await self.sys_addons.boot(AddonStartup.INITIALIZE)
+
             # HomeAssistant is already running, only Supervisor restarted
             if await self.sys_hardware.helper.last_boot() == self.sys_config.last_boot:
                 _LOGGER.info("Detected Supervisor restart")
@@ -298,7 +294,6 @@ class Core(CoreSysAttributes):
 
             # Upate Host/Deivce information
             self.sys_create_task(self.sys_host.reload())
-            self.sys_create_task(self.sys_updater.reload())
             self.sys_create_task(self.sys_resolution.healthcheck())
 
             await self.set_state(CoreState.RUNNING)
@@ -307,7 +302,7 @@ class Core(CoreSysAttributes):
             )
             _LOGGER.info("Supervisor is up and running")
 
-    async def stop(self):
+    async def stop(self) -> None:
         """Stop a running orchestration."""
         # store new last boot / prevent time adjustments
         if self.state in (CoreState.RUNNING, CoreState.SHUTDOWN):
@@ -355,7 +350,7 @@ class Core(CoreSysAttributes):
         _LOGGER.info("Supervisor is down - %d", self.exit_code)
         self.sys_loop.stop()
 
-    async def shutdown(self, *, remove_homeassistant_container: bool = False):
+    async def shutdown(self, *, remove_homeassistant_container: bool = False) -> None:
         """Shutdown all running containers in correct order."""
         # don't process scheduler anymore
         if self.state == CoreState.RUNNING:
@@ -379,20 +374,29 @@ class Core(CoreSysAttributes):
         if self.state in (CoreState.STOPPING, CoreState.SHUTDOWN):
             await self.sys_plugins.shutdown()
 
-    async def _update_last_boot(self):
+    async def _update_last_boot(self) -> None:
         """Update last boot time."""
-        self.sys_config.last_boot = await self.sys_hardware.helper.last_boot()
+        if not (last_boot := await self.sys_hardware.helper.last_boot()):
+            _LOGGER.error("Could not update last boot information!")
+            return
+        self.sys_config.last_boot = last_boot
         await self.sys_config.save_data()
 
-    async def _retrieve_whoami(self, with_ssl: bool) -> WhoamiData | None:
-        try:
-            return await retrieve_whoami(self.sys_websession, with_ssl)
-        except WhoamiSSLError:
-            _LOGGER.info("Whoami service SSL error")
-            return None
-
-    async def _adjust_system_datetime(self):
+    async def _adjust_system_datetime(self) -> None:
         """Adjust system time/date on startup."""
+        # Ensure host system timezone matches supervisor timezone configuration
+        if (
+            self.sys_config.timezone
+            and self.sys_host.info.timezone != self.sys_config.timezone
+            and self.sys_dbus.timedate.is_connected
+        ):
+            _LOGGER.info(
+                "Timezone in Supervisor config '%s' differs from host '%s'",
+                self.sys_config.timezone,
+                self.sys_host.info.timezone,
+            )
+            await self.sys_host.control.set_timezone(self.sys_config.timezone)
+
         # If no timezone is detect or set
         # If we are not connected or time sync
         if (
@@ -403,16 +407,20 @@ class Core(CoreSysAttributes):
 
         # Get Timezone data
         try:
-            data = await self._retrieve_whoami(True)
+            try:
+                data = await retrieve_whoami(self.sys_websession, True)
+            except WhoamiSSLError:
+                # SSL Date Issue & possible time drift
+                _LOGGER.info("Whoami service SSL error")
+                data = await retrieve_whoami(self.sys_websession, False)
 
-            # SSL Date Issue & possible time drift
-            if not data:
-                data = await self._retrieve_whoami(False)
         except WhoamiError as err:
             _LOGGER.warning("Can't adjust Time/Date settings: %s", err)
             return
 
-        await self.sys_config.set_timezone(self.sys_config.timezone or data.timezone)
+        timezone = self.sys_config.timezone or data.timezone
+        await self.sys_config.set_timezone(timezone)
+        await self.sys_host.control.set_timezone(timezone)
 
         # Calculate if system time is out of sync
         delta = data.dt_utc - utcnow()
@@ -423,7 +431,7 @@ class Core(CoreSysAttributes):
         await self.sys_host.control.set_datetime(data.dt_utc)
         await self.sys_supervisor.check_connectivity()
 
-    async def repair(self):
+    async def repair(self) -> None:
         """Repair system integrity."""
         _LOGGER.info("Starting repair of Supervisor Environment")
         await self.sys_run_in_executor(self.sys_docker.repair)

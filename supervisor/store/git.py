@@ -1,19 +1,20 @@
 """Init file for Supervisor add-on Git."""
 
 import asyncio
+import errno
 import functools as ft
 import logging
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import git
 
-from ..const import ATTR_BRANCH, ATTR_URL, URL_HASSIO_ADDONS
+from ..const import ATTR_BRANCH, ATTR_URL
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import StoreGitCloneError, StoreGitError, StoreJobError
 from ..jobs.decorator import Job, JobCondition
-from ..resolution.const import ContextType, IssueType, SuggestionType
-from ..utils import remove_folder
-from .utils import get_hash_from_repository
+from ..resolution.const import ContextType, IssueType, SuggestionType, UnhealthyReason
+from ..utils import directory_missing_or_empty, remove_folder
 from .validate import RE_REPOSITORY
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -22,8 +23,6 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 class GitRepo(CoreSysAttributes):
     """Manage Add-on Git repository."""
 
-    builtin: bool
-
     def __init__(self, coresys: CoreSys, path: Path, url: str):
         """Initialize Git base wrapper."""
         self.coresys: CoreSys = coresys
@@ -31,7 +30,9 @@ class GitRepo(CoreSysAttributes):
         self.path: Path = path
         self.lock: asyncio.Lock = asyncio.Lock()
 
-        self.data: dict[str, str] = RE_REPOSITORY.match(url).groupdict()
+        if not (repository := RE_REPOSITORY.match(url)):
+            raise ValueError(f"Invalid url provided for repository GitRepo: {url}")
+        self.data: dict[str, str] = repository.groupdict()
 
     def __repr__(self) -> str:
         """Return internal representation."""
@@ -49,7 +50,7 @@ class GitRepo(CoreSysAttributes):
 
     async def load(self) -> None:
         """Init Git add-on repository."""
-        if not await self.sys_run_in_executor((self.path / ".git").is_dir):
+        if await self.sys_run_in_executor(directory_missing_or_empty, self.path):
             await self.clone()
             return
 
@@ -85,35 +86,77 @@ class GitRepo(CoreSysAttributes):
     async def clone(self) -> None:
         """Clone git add-on repository."""
         async with self.lock:
-            git_args = {
-                attribute: value
-                for attribute, value in (
-                    ("recursive", True),
-                    ("branch", self.branch),
-                    ("depth", 1),
-                    ("shallow-submodules", True),
-                )
-                if value is not None
-            }
+            await self._clone()
 
-            try:
-                _LOGGER.info(
-                    "Cloning add-on %s repository from %s", self.path, self.url
-                )
-                self.repo = await self.sys_run_in_executor(
-                    ft.partial(
-                        git.Repo.clone_from, self.url, str(self.path), **git_args
-                    )
-                )
+    @Job(
+        name="git_repo_reset",
+        conditions=[JobCondition.FREE_SPACE, JobCondition.INTERNET_SYSTEM],
+        on_condition=StoreJobError,
+    )
+    async def reset(self) -> None:
+        """Reset repository to fix issue with local copy."""
+        # Clone into temporary folder
+        temp_dir = await self.sys_run_in_executor(
+            TemporaryDirectory, dir=self.sys_config.path_tmp
+        )
+        temp_path = Path(temp_dir.name)
+        try:
+            await self._clone(temp_path)
 
-            except (
-                git.InvalidGitRepositoryError,
-                git.NoSuchPathError,
-                git.CommandError,
-                UnicodeDecodeError,
-            ) as err:
-                _LOGGER.error("Can't clone %s repository: %s.", self.url, err)
-                raise StoreGitCloneError() from err
+            # Remove corrupted repo and move temp clone to its place
+            def move_clone():
+                remove_folder(folder=self.path)
+                temp_path.rename(self.path)
+
+            async with self.lock:
+                try:
+                    await self.sys_run_in_executor(move_clone)
+                except OSError as err:
+                    if err.errno == errno.EBADMSG:
+                        self.sys_resolution.add_unhealthy_reason(
+                            UnhealthyReason.OSERROR_BAD_MESSAGE
+                        )
+                    raise StoreGitCloneError(
+                        f"Can't move clone due to: {err!s}", _LOGGER.error
+                    ) from err
+        finally:
+            # Clean up temporary directory in case of error
+            # If the folder was moved this will do nothing
+            await self.sys_run_in_executor(temp_dir.cleanup)
+
+    async def _clone(self, path: Path | None = None) -> None:
+        """Clone git add-on repository to location."""
+        path = path or self.path
+        git_args = {
+            attribute: value
+            for attribute, value in (
+                ("recursive", True),
+                ("branch", self.branch),
+                ("depth", 1),
+                ("shallow-submodules", True),
+            )
+            if value is not None
+        }
+
+        try:
+            _LOGGER.info("Cloning add-on %s repository from %s", path, self.url)
+            self.repo = await self.sys_run_in_executor(
+                ft.partial(
+                    git.Repo.clone_from,
+                    self.url,
+                    str(path),
+                    **git_args,  # type: ignore
+                )
+            )
+
+        except (
+            git.InvalidGitRepositoryError,
+            git.NoSuchPathError,
+            git.CommandError,
+            UnicodeDecodeError,
+        ) as err:
+            _LOGGER.error("Can't clone %s repository: %s.", self.url, err)
+            raise StoreGitCloneError() from err
 
     @Job(
         name="git_repo_pull",
@@ -124,10 +167,10 @@ class GitRepo(CoreSysAttributes):
         """Pull Git add-on repo."""
         if self.lock.locked():
             _LOGGER.warning("There is already a task in progress")
-            return
+            return False
         if self.repo is None:
             _LOGGER.warning("No valid repository for %s", self.url)
-            return
+            return False
 
         async with self.lock:
             _LOGGER.info("Update add-on %s repository from %s", self.path, self.url)
@@ -146,7 +189,7 @@ class GitRepo(CoreSysAttributes):
                 await self.sys_run_in_executor(
                     ft.partial(
                         self.repo.remotes.origin.fetch,
-                        **{"update-shallow": True, "depth": 1},
+                        **{"update-shallow": True, "depth": 1},  # type: ignore
                     )
                 )
 
@@ -192,11 +235,16 @@ class GitRepo(CoreSysAttributes):
                 )
                 raise StoreGitError() from err
 
-    async def _remove(self):
+    async def remove(self) -> None:
         """Remove a repository."""
         if self.lock.locked():
-            _LOGGER.warning("There is already a task in progress")
+            _LOGGER.warning(
+                "Cannot remove add-on repository %s, there is already a task in progress",
+                self.url,
+            )
             return
+
+        _LOGGER.info("Removing custom add-on repository %s", self.url)
 
         def _remove_git_dir(path: Path) -> None:
             if not path.is_dir():
@@ -205,30 +253,3 @@ class GitRepo(CoreSysAttributes):
 
         async with self.lock:
             await self.sys_run_in_executor(_remove_git_dir, self.path)
-
-
-class GitRepoHassIO(GitRepo):
-    """Supervisor add-ons repository."""
-
-    builtin: bool = False
-
-    def __init__(self, coresys):
-        """Initialize Git Supervisor add-on repository."""
-        super().__init__(coresys, coresys.config.path_addons_core, URL_HASSIO_ADDONS)
-
-
-class GitRepoCustom(GitRepo):
-    """Custom add-ons repository."""
-
-    builtin: bool = False
-
-    def __init__(self, coresys, url):
-        """Initialize custom Git Supervisor addo-n repository."""
-        path = Path(coresys.config.path_addons_git, get_hash_from_repository(url))
-
-        super().__init__(coresys, path, url)
-
-    async def remove(self):
-        """Remove a custom repository."""
-        _LOGGER.info("Removing custom add-on repository %s", self.url)
-        await self._remove()

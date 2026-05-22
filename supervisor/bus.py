@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from asyncio import Task
+from collections.abc import Callable, Coroutine
 import logging
 from typing import Any
 
@@ -19,7 +20,7 @@ class EventListener:
     """Event listener."""
 
     event_type: BusEvent = attr.ib()
-    callback: Callable[[Any], Awaitable[None]] = attr.ib()
+    callback: Callable[[Any], Coroutine[Any, Any, None]] = attr.ib()
 
 
 class Bus(CoreSysAttributes):
@@ -31,18 +32,20 @@ class Bus(CoreSysAttributes):
         self._listeners: dict[BusEvent, list[EventListener]] = {}
 
     def register_event(
-        self, event: BusEvent, callback: Callable[[Any], Awaitable[None]]
+        self, event: BusEvent, callback: Callable[[Any], Coroutine[Any, Any, None]]
     ) -> EventListener:
         """Register callback for an event."""
         listener = EventListener(event, callback)
         self._listeners.setdefault(event, []).append(listener)
         return listener
 
-    def fire_event(self, event: BusEvent, reference: Any) -> None:
+    def fire_event(self, event: BusEvent, reference: Any) -> list[Task]:
         """Fire an event to the bus."""
         _LOGGER.debug("Fire event '%s' with '%s'", event, reference)
+        tasks: list[Task] = []
         for listener in self._listeners.get(event, []):
-            self.sys_create_task(listener.callback(reference))
+            tasks.append(self.sys_create_task(listener.callback(reference)))
+        return tasks
 
     def remove_listener(self, listener: EventListener) -> None:
         """Unregister an listener."""

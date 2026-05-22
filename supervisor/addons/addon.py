@@ -67,17 +67,16 @@ from ..docker.monitor import DockerContainerStateEvent
 from ..docker.stats import DockerStats
 from ..exceptions import (
     AddonConfigurationError,
+    AddonNotSupportedError,
     AddonsError,
     AddonsJobError,
-    AddonsNotSupportedError,
     ConfigurationFileError,
     DockerError,
-    HomeAssistantAPIError,
     HostAppArmorError,
 )
 from ..hardware.data import Device
 from ..homeassistant.const import WSEvent
-from ..jobs.const import JobExecutionLimit
+from ..jobs.const import JobConcurrency, JobThrottle
 from ..jobs.decorator import Job
 from ..resolution.const import ContextType, IssueType, UnhealthyReason
 from ..resolution.data import Issue
@@ -227,6 +226,7 @@ class Addon(AddonModel):
         )
 
         await self._check_ingress_port()
+
         default_image = self._image(self.data)
         try:
             await self.instance.attach(version=self.version)
@@ -360,7 +360,7 @@ class Addon(AddonModel):
     @property
     def auto_update(self) -> bool:
         """Return if auto update is enable."""
-        return self.persist.get(ATTR_AUTO_UPDATE, super().auto_update)
+        return self.persist.get(ATTR_AUTO_UPDATE, False)
 
     @auto_update.setter
     def auto_update(self, value: bool) -> None:
@@ -733,8 +733,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_unload",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def unload(self) -> None:
         """Unload add-on and remove data."""
@@ -766,8 +766,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_install",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def install(self) -> None:
         """Install and setup this addon."""
@@ -775,7 +775,6 @@ class Addon(AddonModel):
             raise AddonsError("Missing from store, cannot install!")
 
         await self.sys_addons.data.install(self.addon_store)
-        await self.load()
 
         def setup_data():
             if not self.path_data.is_dir():
@@ -798,6 +797,9 @@ class Addon(AddonModel):
             await self.sys_addons.data.uninstall(self)
             raise AddonsError() from err
 
+        # Finish initialization and set up listeners
+        await self.load()
+
         # Add to addon manager
         self.sys_addons.local[self.slug] = self
 
@@ -807,8 +809,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_uninstall",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def uninstall(
         self, *, remove_config: bool, remove_image: bool = True
@@ -842,8 +844,7 @@ class Addon(AddonModel):
         # Cleanup Ingress panel from sidebar
         if self.ingress_panel:
             self.ingress_panel = False
-            with suppress(HomeAssistantAPIError):
-                await self.sys_ingress.update_hass_panel(self)
+            await self.sys_ingress.update_hass_panel(self)
 
         # Cleanup Ingress dynamic port assignment
         need_ingress_token_cleanup = False
@@ -873,8 +874,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_update",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def update(self) -> asyncio.Task | None:
         """Update this addon to latest version.
@@ -923,8 +924,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_rebuild",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def rebuild(self) -> asyncio.Task | None:
         """Rebuild this addons container and image.
@@ -1068,8 +1069,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_start",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def start(self) -> asyncio.Task:
         """Set options and start add-on.
@@ -1117,8 +1118,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_stop",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def stop(self) -> None:
         """Stop add-on."""
@@ -1131,8 +1132,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_restart",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def restart(self) -> asyncio.Task:
         """Restart add-on.
@@ -1166,13 +1167,13 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_write_stdin",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def write_stdin(self, data) -> None:
         """Write data to add-on stdin."""
         if not self.with_stdin:
-            raise AddonsNotSupportedError(
+            raise AddonNotSupportedError(
                 f"Add-on {self.slug} does not support writing to stdin!", _LOGGER.error
             )
 
@@ -1200,8 +1201,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_begin_backup",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def begin_backup(self) -> bool:
         """Execute pre commands or stop addon if necessary.
@@ -1222,8 +1223,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_end_backup",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def end_backup(self) -> asyncio.Task | None:
         """Execute post commands or restart addon if necessary.
@@ -1260,8 +1261,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_backup",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def backup(self, tar_file: tarfile.TarFile) -> asyncio.Task | None:
         """Backup state of an add-on.
@@ -1368,8 +1369,8 @@ class Addon(AddonModel):
 
     @Job(
         name="addon_restore",
-        limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=AddonsJobError,
+        concurrency=JobConcurrency.GROUP_REJECT,
     )
     async def restore(self, tar_file: tarfile.TarFile) -> asyncio.Task | None:
         """Restore state of an add-on.
@@ -1419,7 +1420,7 @@ class Addon(AddonModel):
 
             # If available
             if not self._available(data[ATTR_SYSTEM]):
-                raise AddonsNotSupportedError(
+                raise AddonNotSupportedError(
                     f"Add-on {self.slug} is not available for this platform",
                     _LOGGER.error,
                 )
@@ -1512,19 +1513,12 @@ class Addon(AddonModel):
         _LOGGER.info("Finished restore for add-on %s", self.slug)
         return wait_for_start
 
-    def check_trust(self) -> Awaitable[None]:
-        """Calculate Addon docker content trust.
-
-        Return Coroutine.
-        """
-        return self.instance.check_trust()
-
     @Job(
         name="addon_restart_after_problem",
-        limit=JobExecutionLimit.GROUP_THROTTLE_RATE_LIMIT,
         throttle_period=WATCHDOG_THROTTLE_PERIOD,
         throttle_max_calls=WATCHDOG_THROTTLE_MAX_CALLS,
         on_condition=AddonsJobError,
+        throttle=JobThrottle.GROUP_RATE_LIMIT,
     )
     async def _restart_after_problem(self, state: ContainerState):
         """Restart unhealthy or failed addon."""
@@ -1561,7 +1555,15 @@ class Addon(AddonModel):
                 )
                 break
 
-            await asyncio.sleep(WATCHDOG_RETRY_SECONDS)
+            # Exponential backoff to spread retries over the throttle window
+            delay = WATCHDOG_RETRY_SECONDS * (1 << max(attempts - 1, 0))
+            _LOGGER.debug(
+                "Watchdog will retry addon %s in %s seconds (attempt %s)",
+                self.name,
+                delay,
+                attempts + 1,
+            )
+            await asyncio.sleep(delay)
 
     async def container_state_changed(self, event: DockerContainerStateEvent) -> None:
         """Set addon state from container state."""

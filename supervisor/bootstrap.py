@@ -1,6 +1,8 @@
 """Bootstrap Supervisor."""
 
 # ruff: noqa: T100
+import asyncio
+from collections.abc import Callable
 from importlib import import_module
 import logging
 import os
@@ -103,7 +105,6 @@ async def initialize_coresys() -> CoreSys:
 
     if coresys.dev:
         coresys.updater.channel = UpdateChannel.DEV
-        coresys.security.content_trust = False
 
     # Convert datetime
     logging.Formatter.converter = lambda *args: coresys.now().timetuple()
@@ -225,6 +226,10 @@ def initialize_system(coresys: CoreSys) -> None:
         )
         config.path_addon_configs.mkdir()
 
+    if not config.path_cid_files.is_dir():
+        _LOGGER.debug("Creating Docker cidfiles folder at '%s'", config.path_cid_files)
+        config.path_cid_files.mkdir()
+
 
 def warning_handler(message, category, filename, lineno, file=None, line=None):
     """Warning handler which logs warnings using the logging module."""
@@ -284,26 +289,22 @@ def check_environment() -> None:
         _LOGGER.critical("Can't find Docker socket!")
 
 
-def reg_signal(loop, coresys: CoreSys) -> None:
-    """Register SIGTERM and SIGKILL to stop system."""
+def register_signal_handlers(
+    loop: asyncio.AbstractEventLoop, shutdown_handler: Callable[[], None]
+) -> None:
+    """Register SIGTERM, SIGHUP and SIGKILL to stop the Supervisor."""
     try:
-        loop.add_signal_handler(
-            signal.SIGTERM, lambda: loop.create_task(coresys.core.stop())
-        )
+        loop.add_signal_handler(signal.SIGTERM, shutdown_handler)
     except (ValueError, RuntimeError):
         _LOGGER.warning("Could not bind to SIGTERM")
 
     try:
-        loop.add_signal_handler(
-            signal.SIGHUP, lambda: loop.create_task(coresys.core.stop())
-        )
+        loop.add_signal_handler(signal.SIGHUP, shutdown_handler)
     except (ValueError, RuntimeError):
         _LOGGER.warning("Could not bind to SIGHUP")
 
     try:
-        loop.add_signal_handler(
-            signal.SIGINT, lambda: loop.create_task(coresys.core.stop())
-        )
+        loop.add_signal_handler(signal.SIGINT, shutdown_handler)
     except (ValueError, RuntimeError):
         _LOGGER.warning("Could not bind to SIGINT")
 

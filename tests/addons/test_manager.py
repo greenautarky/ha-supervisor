@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Generator
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, call, patch
 
 from awesomeversion import AwesomeVersion
 import pytest
@@ -29,7 +29,7 @@ from supervisor.plugins.dns import PluginDns
 from supervisor.resolution.const import ContextType, IssueType, SuggestionType
 from supervisor.resolution.data import Issue, Suggestion
 from supervisor.store.addon import AddonStore
-from supervisor.store.repository import Repository
+from supervisor.store.repository import RepositoryLocal
 from supervisor.utils import check_exception_chain
 from supervisor.utils.common import write_json_file
 
@@ -67,7 +67,7 @@ async def fixture_remove_wait_boot(coresys: CoreSys) -> AsyncGenerator[None]:
 
 @pytest.fixture(name="install_addon_example_image")
 async def fixture_install_addon_example_image(
-    coresys: CoreSys, repository
+    coresys: CoreSys, test_repository
 ) -> Generator[Addon]:
     """Install local_example add-on with image."""
     store = coresys.addons.store["local_example_image"]
@@ -442,7 +442,7 @@ async def test_store_data_changes_during_update(
     update_task = coresys.create_task(simulate_update())
     await asyncio.sleep(0)
 
-    with patch.object(Repository, "update", return_value=True):
+    with patch.object(RepositoryLocal, "update", return_value=True):
         await coresys.store.reload()
 
     assert "image" not in coresys.store.data.addons["local_ssh"]
@@ -514,19 +514,13 @@ async def test_shared_image_kept_on_uninstall(
     latest = f"{install_addon_example.image}:latest"
 
     await coresys.addons.uninstall("local_example2")
-    coresys.docker.images.remove.assert_not_called()
+    coresys.docker.images.delete.assert_not_called()
     assert not coresys.addons.get("local_example2", local_only=True)
 
     await coresys.addons.uninstall("local_example")
-    assert coresys.docker.images.remove.call_count == 2
-    assert coresys.docker.images.remove.call_args_list[0].kwargs == {
-        "image": latest,
-        "force": True,
-    }
-    assert coresys.docker.images.remove.call_args_list[1].kwargs == {
-        "image": image,
-        "force": True,
-    }
+    assert coresys.docker.images.delete.call_count == 2
+    assert coresys.docker.images.delete.call_args_list[0] == call(latest, force=True)
+    assert coresys.docker.images.delete.call_args_list[1] == call(image, force=True)
     assert not coresys.addons.get("local_example", local_only=True)
 
 
@@ -554,18 +548,17 @@ async def test_shared_image_kept_on_update(
     assert example_2.version == "1.2.0"
     assert install_addon_example_image.version == "1.2.0"
 
-    image_new = MagicMock()
-    image_new.id = "image_new"
-    image_old = MagicMock()
-    image_old.id = "image_old"
-    docker.images.get.side_effect = [image_new, image_old]
+    image_new = {"Id": "image_new", "RepoTags": ["image_new:latest"]}
+    image_old = {"Id": "image_old", "RepoTags": ["image_old:latest"]}
+    docker.images.inspect.side_effect = [image_new, image_old]
     docker.images.list.return_value = [image_new, image_old]
 
-    await coresys.addons.update("local_example2")
-    docker.images.remove.assert_not_called()
-    assert example_2.version == "1.3.0"
+    with patch.object(DockerAPI, "pull_image", return_value=image_new):
+        await coresys.addons.update("local_example2")
+        docker.images.delete.assert_not_called()
+        assert example_2.version == "1.3.0"
 
-    docker.images.get.side_effect = [image_new]
-    await coresys.addons.update("local_example_image")
-    docker.images.remove.assert_called_once_with("image_old", force=True)
-    assert install_addon_example_image.version == "1.3.0"
+        docker.images.inspect.side_effect = [image_new]
+        await coresys.addons.update("local_example_image")
+        docker.images.delete.assert_called_once_with("image_old", force=True)
+        assert install_addon_example_image.version == "1.3.0"
