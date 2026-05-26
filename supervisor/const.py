@@ -9,7 +9,7 @@ from typing import NotRequired, Self, TypedDict
 
 from aiohttp import __version__ as aiohttpversion
 
-SUPERVISOR_VERSION = "2025.11.5.1"
+SUPERVISOR_VERSION = "2025.11.5.2"
 SERVER_SOFTWARE = f"HomeAssistantSupervisor/{SUPERVISOR_VERSION} aiohttp/{aiohttpversion} Python/{systemversion[0]}.{systemversion[1]}"
 
 DOCKER_PREFIX: str = "hassio"
@@ -18,7 +18,15 @@ SUPERVISOR_DOCKER_NAME: str = f"{DOCKER_PREFIX}_supervisor"
 
 URL_HASSIO_ADDONS = "https://github.com/home-assistant/addons"
 URL_HASSIO_APPARMOR = "https://version.home-assistant.io/apparmor_{channel}.txt"
-URL_HASSIO_VERSION = "https://raw.githubusercontent.com/greenautarky/haos-version/main/{channel}.json"
+# GreenAutarky V1.2-clean WIP pointer: the V1.2-clean version chain
+# (stock Core + this minimal supervisor) lives on the
+# release/v1.2-rebuild branch of greenautarky/haos-version.
+# haos-version's main branch is still the live v1.1 chain (GA-fork
+# Core + supervisor 2025.11.4.1) — fetching main here would make a
+# V1.2-clean device install the fork Core. Mirrors ha-operating-system
+# hassio.mk HASSIO_VERSION_URL (pointed at release/v1.2-rebuild in 87d61e58).
+# Revert to main/ when release/v1.2-rebuild merges at the V1.2 promote.
+URL_HASSIO_VERSION = "https://raw.githubusercontent.com/greenautarky/haos-version/release/v1.2-rebuild/{channel}.json"
 
 SUPERVISOR_DATA = Path("/data")
 

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from awesomeversion import AwesomeVersion
 import pytest
 
-from supervisor.const import ATTR_HASSOS_UNRESTRICTED, BusEvent
+from supervisor.const import ATTR_HASSOS_UNRESTRICTED, URL_HASSIO_VERSION, BusEvent
 from supervisor.coresys import CoreSys
 from supervisor.dbus.const import ConnectivityState
 from supervisor.exceptions import UpdaterJobError
@@ -19,7 +19,10 @@ from tests.dbus_service_mocks.network_manager import (
     NetworkManager as NetworkManagerService,
 )
 
-URL_TEST = "https://version.home-assistant.io/stable.json"
+# GreenAutarky: the version URL is a GA constant (greenautarky/haos-version),
+# not the upstream version.home-assistant.io endpoint. Derive from the
+# constant so the test tracks the GA URL whichever branch it points at.
+URL_TEST = URL_HASSIO_VERSION.format(channel="stable")
 
 
 @pytest.mark.usefixtures("no_job_throttle")
@@ -135,10 +138,7 @@ async def test_delayed_fetch_for_connectivity(
     await asyncio.sleep(0)
 
     coresys.websession.get.assert_called_once()
-    assert (
-        coresys.websession.get.call_args[0][0]
-        == "https://version.home-assistant.io/stable.json"
-    )
+    assert coresys.websession.get.call_args[0][0] == URL_TEST
 
 
 @pytest.mark.usefixtures("no_job_throttle")
