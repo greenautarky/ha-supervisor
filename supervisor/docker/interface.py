@@ -208,6 +208,17 @@ class DockerInterface(JobGroup, ABC):
 
         return credentials
 
+    async def _docker_login(self, image: str) -> None:
+        """Try to log in to the registry if there are credentials available."""
+        if not self.sys_docker.config.registries:
+            return
+
+        credentials = self._get_credentials(image)
+        if not credentials:
+            return
+
+        await self.sys_run_in_executor(self.sys_docker.dockerpy.login, **credentials)
+
     def _process_pull_image_log(  # noqa: C901
         self, install_job_id: str, reference: PullLogEntry
     ) -> None:
@@ -392,8 +403,9 @@ class DockerInterface(JobGroup, ABC):
 
         _LOGGER.info("Downloading docker image %s with tag %s.", image, version)
         try:
-            # Get credentials for private registries to pass to aiodocker
-            credentials = self._get_credentials(image) or None
+            if self.sys_docker.config.registries:
+                # Try login if we have defined credentials
+                await self._docker_login(image)
 
             curr_job_id = self.sys_jobs.current.uuid
 
@@ -409,13 +421,12 @@ class DockerInterface(JobGroup, ABC):
                 BusEvent.DOCKER_IMAGE_PULL_UPDATE, process_pull_image_log
             )
 
-            # Pull new image, passing credentials to aiodocker
+            # Pull new image
             docker_image = await self.sys_docker.pull_image(
                 self.sys_jobs.current.uuid,
                 image,
                 str(version),
                 platform=MAP_ARCH[image_arch],
-                auth=credentials,
             )
 
             # Tag latest
