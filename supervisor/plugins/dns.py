@@ -9,6 +9,7 @@ import errno
 from ipaddress import IPv4Address
 import logging
 from pathlib import Path
+import time
 
 import attr
 from awesomeversion import AwesomeVersion
@@ -449,6 +450,18 @@ class PluginDns(PluginBase):
         """Load GA_SERVICES_IP for influx/loki (NetBird-only direct backends)."""
         return cls._read_ga_conf_value("GA_SERVICES_IP") or cls._GA_HARDCODED_FALLBACK_IP
 
+    # Boot-race guard: if Supervisor starts before ga-resolve-ota.service
+    # has populated /run/ga-resolve-ota.active, the fall-through to
+    # GA_OTA_IPS (= same NetBird IP today) usually works — but in some
+    # cases the dns chain falls back to public DNS for ota.greenautarky.com,
+    # which won't be reachable via the device's NetBird-only tunnel.
+    # Observed K7 BOSv1.2.12 OTA failure 2026-06-10:
+    #   Cannot connect to host ota.greenautarky.com:443
+    #   Connect call failed ('172.30.32.1', 443)
+    # The boot-race window is normally < 1s. Wait up to this many seconds
+    # for the file before giving up + using the static fallback chain.
+    _GA_OTA_ACTIVE_WAIT_S = 15
+
     @classmethod
     def _load_ga_ota_ip(cls) -> str:
         """Load OTA endpoint IP, mirroring the host-side ga-resolve-ota picker.
@@ -459,15 +472,36 @@ class PluginDns(PluginBase):
              Keeps Supervisor CoreDNS aligned with host /etc/hosts; without
              this, host and supervisor could resolve ota.* to different IPs
              during a failover event.
+
+             To avoid the boot race (= Supervisor starts before
+             ga-resolve-ota.service populates the file), we wait up to
+             _GA_OTA_ACTIVE_WAIT_S seconds for it. Cheap on the happy path
+             (= file already present, no wait), bounded on the unhappy
+             (= file never appears, fall through to step 2).
           2. First IP in GA_OTA_IPS — same priority order ga-resolve-ota uses.
           3. GA_SERVICES_IP — last fallback before the hardcoded constant.
         """
-        for active_path in (Path("/run/ga-resolve-ota.active"),
-                            Path("/os/run/ga-resolve-ota.active")):
-            if active_path.is_file():
-                ip = active_path.read_text(encoding="utf-8").strip()
-                if ip:
-                    return ip
+        candidate_paths = (Path("/run/ga-resolve-ota.active"),
+                           Path("/os/run/ga-resolve-ota.active"))
+
+        deadline = time.monotonic() + cls._GA_OTA_ACTIVE_WAIT_S
+        while True:
+            for active_path in candidate_paths:
+                if active_path.is_file():
+                    ip = active_path.read_text(encoding="utf-8").strip()
+                    if ip:
+                        return ip
+            if time.monotonic() >= deadline:
+                break
+            # Poll at 200 ms — the file appears within ~1 s under normal
+            # boot conditions; we don't want to burn CPU on the happy path.
+            time.sleep(0.2)
+
+        _LOGGER.warning(
+            "GA OTA: /run/ga-resolve-ota.active never appeared in %ds — "
+            "falling back to GA_OTA_IPS / GA_SERVICES_IP",
+            cls._GA_OTA_ACTIVE_WAIT_S,
+        )
         ga_ota_ips = cls._read_ga_conf_value("GA_OTA_IPS")
         if ga_ota_ips:
             first = ga_ota_ips.split()[0] if ga_ota_ips.split() else ""
