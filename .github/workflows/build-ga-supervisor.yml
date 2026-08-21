@@ -29,7 +29,18 @@ on:
 
 env:
   IMAGE: ghcr.io/greenautarky/armv7-hassio-supervisor
-  BUILD_FROM: ghcr.io/home-assistant/armv7-base-python:3.13-alpine3.22
+  # BUILD_FROM used to be pinned here, by hand, to
+  # ghcr.io/home-assistant/armv7-base-python:3.13-alpine3.22 — while build.yaml
+  # in this repo declared ...:3.13-alpine3.22-2025.11.1. It now comes from
+  # build.yaml. See the "Resolve base image" step.
+  #
+  # COSIGN_VERSION is the SAME hand-mirrored shape and is deliberately NOT
+  # changed here: build.yaml also declares `args: COSIGN_VERSION: 2.5.3`, and
+  # this env value duplicates it. Both read 2.5.3 today (measured 2026-08-20),
+  # so nothing is broken, but it is a second copy of a declared fact and it can
+  # drift exactly the way BUILD_FROM did. Fixing it means forwarding `args:`
+  # generically — the mechanism greenautarky/MQTT uses — which is a separate
+  # change with its own review, not a rider on this one.
   COSIGN_VERSION: "2.5.3"
 
 jobs:
@@ -56,6 +67,73 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # THE BASE IS DECLARED IN build.yaml AND RESOLVED BY ONE SHARED
+      # IMPLEMENTATION. A pipeline that looks it up any other way is a defect
+      # even when it currently produces the right answer — and this one did.
+      #
+      # This repo disagreed with itself. `builder.yml` builds the Supervisor
+      # through home-assistant/builder@, which reads build.yaml and therefore
+      # used the declared base. This workflow pinned its own literal in `env:`.
+      # Two workflows, one repo, one question, two answers:
+      #
+      #   build.yaml declares  ...armv7-base-python:3.13-alpine3.22-2025.11.1
+      #   this workflow pinned ...armv7-base-python:3.13-alpine3.22
+      #
+      # THE STRING CHANGES AND THE IMAGE DOES NOT. That is the entire point of
+      # the fix, so it is worth being exact about. Measured against ghcr.io on
+      # 2026-08-20, immediately before this change, both tags resolved to the
+      # same manifest:
+      #
+      #   3.13-alpine3.22             sha256:7345b5c14660ef1987450964794ab8b46f89aa59b195eb5914dc2a7dc29fdc49
+      #   3.13-alpine3.22-2025.11.1   sha256:7345b5c14660ef1987450964794ab8b46f89aa59b195eb5914dc2a7dc29fdc49
+      #
+      # So this is a refactor and NOT a base bump: no version decision is being
+      # taken here and nothing about the built image changes today. What changes
+      # is WHY they match. `3.13-alpine3.22` is a FLOATING tag and
+      # `-2025.11.1` is a dated pin; they agreed by luck, and upstream
+      # republishing the floating tag would have moved the Supervisor's base
+      # underneath the fleet with nothing to catch it. Not a hypothetical gap in
+      # coverage — a measured one: the base-vs-image comparison that guards the
+      # add-ons cannot see this, because both tags carry the same distro
+      # identity. It would have been green the whole way down.
+      #
+      # The fleet runs supervised-armv7 on this fork, so that silence is the
+      # expensive part, not the drift.
+      #
+      # ON USING THE ADD-ON RESOLVER FOR A NON-ADD-ON: checked rather than
+      # assumed. resolve_addon_base.py reads exactly `build_from[<arch>]` and
+      # tolerates unknown sibling keys (fixture: "extra keys alongside
+      # build_from are tolerated"). This build.yaml is
+      # `image/build_from/cosign/args/labels` with `build_from` an arch->image
+      # mapping covering all five arches — the shape the resolver expects, so it
+      # fits without being forced. Its legacy no-build.yaml branch would
+      # construct an add-on-shaped name that is wrong for the Supervisor, which
+      # is why the step asserts build.yaml is present and never reaches it.
+      - name: Checkout the store repo (public — carries the base resolver)
+        uses: actions/checkout@v4
+        with:
+          repository: greenautarky/vibe_addons
+          path: .store
+
+      - name: Install PyYAML
+        run: pip install --quiet "PyYAML>=6,<7"
+
+      - name: Resolve base image
+        id: base
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f build.yaml ]; then
+            echo "::error::build.yaml is missing. The Supervisor declares its base there; a missing declaration is a build error, not a reason to build something else."
+            exit 1
+          fi
+          img=$(python3 .store/scripts/resolve_addon_base.py \
+                  --addon-dir . \
+                  --arch armv7 \
+                  --legacy-tag UNREACHABLE)
+          echo "img=$img" >> "$GITHUB_OUTPUT"
+          echo "Using base: $img"
 
       - name: Determine version + tags
         id: meta
@@ -105,7 +183,7 @@ jobs:
           no-cache: true
           platforms: linux/arm/v7
           build-args: |
-            BUILD_FROM=${{ env.BUILD_FROM }}
+            BUILD_FROM=${{ steps.base.outputs.img }}
             BUILD_ARCH=armv7
             COSIGN_VERSION=${{ env.COSIGN_VERSION }}
           labels: |
