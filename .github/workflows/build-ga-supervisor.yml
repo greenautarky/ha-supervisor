@@ -30,7 +30,7 @@ on:
 env:
   IMAGE: ghcr.io/greenautarky/armv7-hassio-supervisor
   BUILD_FROM: ghcr.io/home-assistant/armv7-base-python:3.13-alpine3.22
-  COSIGN_VERSION: "2.5.3"
+  COSIGN_VERSION: "2.6.0"
 
 jobs:
   build:
