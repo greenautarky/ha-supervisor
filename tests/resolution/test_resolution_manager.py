@@ -226,12 +226,14 @@ async def test_events_on_issue_changes(
         "type": "corrupt_repository",
         "context": "store",
         "reference": "test_repo",
+        "reference_extra": None,
         "uuid": issue.uuid,
     }
     suggestion_expected = {
         "type": "execute_reset",
         "context": "store",
         "reference": "test_repo",
+        "reference_extra": None,
         "uuid": suggestion.uuid,
     }
     assert _supervisor_event_message(
@@ -262,6 +264,7 @@ async def test_events_on_issue_changes(
         "type": "execute_remove",
         "context": "store",
         "reference": "test_repo",
+        "reference_extra": None,
         "uuid": execute_remove.uuid,
     } in sent_data["data"]["data"]["suggestions"]
 
@@ -445,6 +448,7 @@ async def test_dismiss_issue_removes_orphaned_suggestions(coresys: CoreSys):
                     "type": "mount_failed",
                     "context": "mount",
                     "reference": "test",
+                    "reference_extra": None,
                     "uuid": issue.uuid,
                 },
             )
