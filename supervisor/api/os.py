@@ -27,6 +27,7 @@ from ..const import (
     ATTR_UPDATE_AVAILABLE,
     ATTR_VERSION,
     ATTR_VERSION_LATEST,
+    ATTR_VERSION_PENDING,
 )
 from ..coresys import CoreSysAttributes
 from ..exceptions import APINotFound, BoardInvalidError
@@ -89,6 +90,16 @@ class APIOS(CoreSysAttributes):
         return {
             ATTR_VERSION: self.sys_os.version,
             ATTR_VERSION_LATEST: self.sys_os.latest_version,
+            # Required by aiohasupervisor 0.6.0, the client Core 2026.8.x pins.
+            # Upstream tracks an
+            # installed-but-not-yet-activated OS version here (2026.07.1, #7006),
+            # which only became possible once upstream stopped rebooting
+            # automatically after a RAUC install (#6982). This fork still reboots
+            # straight after a successful install (OSManager.update), so it never
+            # holds a pending version: None is the measured truth, not a
+            # placeholder. Note this also means ATTR_VERSION stays the running
+            # version, unlike upstream, which reports the pending one.
+            ATTR_VERSION_PENDING: None,
             ATTR_UPDATE_AVAILABLE: self.sys_os.need_update,
             ATTR_BOARD: self.sys_os.board,
             ATTR_BOOT: self.sys_dbus.rauc.boot_slot,

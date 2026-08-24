@@ -848,3 +848,46 @@ async def test_force_shutdown_during_migration(
     with patch.object(SystemControl, "shutdown") as shutdown:
         await api_client.post("/host/shutdown", json={"force": True})
         shutdown.assert_called_once()
+
+
+# Fields required by aiohasupervisor 0.6.0 `HostInfo` — see the note in
+# tests/api/test_homeassistant.py. Pinned constant, never derived from the
+# response under test. This one passes unchanged: /host/info was already
+# complete for Core 2026.x, and this test is here to keep it that way.
+CORE_2026_REQUIRED_HOST_INFO_FIELDS = {
+    "agent_version",
+    "apparmor_version",
+    "boot_timestamp",
+    "broadcast_llmnr",
+    "broadcast_mdns",
+    "chassis",
+    "cpe",
+    "deployment",
+    "disk_free",
+    "disk_life_time",
+    "disk_total",
+    "disk_used",
+    "dt_synchronized",
+    "dt_utc",
+    "features",
+    "hostname",
+    "kernel",
+    "llmnr_hostname",
+    "operating_system",
+    "startup_time",
+    "timezone",
+    "use_ntp",
+    "virtualization",
+}
+
+
+@pytest.mark.asyncio
+async def test_api_host_info_serves_core_2026_contract(
+    api_client: TestClient, coresys_disk_info: CoreSys
+):
+    """/host/info must serve every field aiohasupervisor 0.6.0 requires."""
+    resp = await api_client.get("/host/info")
+    result = await resp.json()
+
+    missing = CORE_2026_REQUIRED_HOST_INFO_FIELDS - set(result["data"])
+    assert not missing, f"HostInfo fields missing from response: {missing}"

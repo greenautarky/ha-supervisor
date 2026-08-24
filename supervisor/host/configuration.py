@@ -65,6 +65,12 @@ class IpSetting:
     address: list[IPv4Interface | IPv6Interface]
     gateway: IPv4Address | IPv6Address | None
     nameservers: list[IPv4Address | IPv6Address]
+    # NetworkManager's `ipv4.route-metric` / `ipv6.route-metric`. Read-only on
+    # this fork: it is surfaced in /network/info because aiohasupervisor 0.6.0
+    # (pinned by Core 2026.8.x) requires the key, but the write path (2026.01.2,
+    # #6447) is NOT ported, so the API cannot change it. None = NM has no
+    # explicit metric configured for this connection.
+    route_metric: int | None = None
 
 
 @dataclass(slots=True)
@@ -171,6 +177,7 @@ class Interface:
                 ]
                 if inet.settings.ipv4.dns
                 else [],
+                route_metric=inet.settings.ipv4.route_metric,
             )
         else:
             ipv4_setting = IpSetting(InterfaceMethod.DISABLED, [], None, [])
@@ -196,6 +203,7 @@ class Interface:
                 nameservers=[IPv6Address(bytes(ip)) for ip in inet.settings.ipv6.dns]
                 if inet.settings.ipv6.dns
                 else [],
+                route_metric=inet.settings.ipv6.route_metric,
             )
         else:
             ipv6_setting = Ip6Setting(InterfaceMethod.DISABLED, [], None, [])

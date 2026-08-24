@@ -359,3 +359,55 @@ async def test_api_progress_updates_home_assistant_update(
             "done": True,
         },
     ]
+
+
+# Fields required by aiohasupervisor 0.6.0 `HomeAssistantInfo` — the client Home
+# Assistant Core 2026.8.x pins in `homeassistant/components/hassio/manifest.json`.
+# Its mashumaro models declare no defaults, so every one of these keys must be
+# present in the response or Core's `hassio` coordinator raises MissingField and
+# retries forever, and Core never completes bootstrap. Pinned constant on
+# purpose: never derive it from the response under test.
+CORE_2026_REQUIRED_CORE_INFO_FIELDS = {
+    "arch",
+    "audio_input",
+    "audio_output",
+    "backups_exclude_database",
+    "boot",
+    "duplicate_log_file",
+    "image",
+    "ip_address",
+    "machine",
+    "port",
+    "ssl",
+    "update_available",
+    "version",
+    "version_latest",
+    "watchdog",
+}
+
+
+async def test_api_core_info_serves_core_2026_contract(api_client: TestClient):
+    """/homeassistant/info must serve every field aiohasupervisor 0.6.0 requires."""
+    resp = await api_client.get("/homeassistant/info")
+    result = await resp.json()
+
+    missing = CORE_2026_REQUIRED_CORE_INFO_FIELDS - set(result["data"])
+    assert not missing, f"HomeAssistantInfo fields missing from response: {missing}"
+
+
+async def test_api_core_options_duplicate_log_file(
+    api_client: TestClient, coresys: CoreSys
+):
+    """Test setting duplicate_log_file via the options API round-trips."""
+    assert coresys.homeassistant.duplicate_log_file is False
+
+    with patch.object(type(coresys.homeassistant), "save_data"):
+        resp = await api_client.post(
+            "/homeassistant/options", json={"duplicate_log_file": True}
+        )
+    assert resp.status == 200
+    assert coresys.homeassistant.duplicate_log_file is True
+
+    resp = await api_client.get("/homeassistant/info")
+    result = await resp.json()
+    assert result["data"]["duplicate_log_file"] is True
