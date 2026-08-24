@@ -98,7 +98,22 @@ class HomeAssistantCore(JobGroup):
             await self.instance.attach(version=version, skip_state_event_if_down=True)
 
             # Ensure we are using correct image for this system (unless user has overridden it)
-            if not self.sys_homeassistant.override_image:
+            override_satisfied = False
+            if self.sys_homeassistant.override_image:
+                override_satisfied = await self._ensure_override_image(version)
+            if not override_satisfied:
+                if self.sys_homeassistant.image != self.sys_homeassistant.default_image:
+                    # Loud fallback (#706): reconciling away from a non-default
+                    # stored image must never happen silently.
+                    _LOGGER.warning(
+                        "Stored Home Assistant image %s differs from the default"
+                        " %s and is not (or no longer) a usable override -"
+                        " reconciling back to the default image. Use 'ha core"
+                        " options --image' to set a persistent per-device"
+                        " override.",
+                        self.sys_homeassistant.image,
+                        self.sys_homeassistant.default_image,
+                    )
                 await self.instance.check_image(
                     version, self.sys_homeassistant.default_image
                 )
@@ -109,8 +124,18 @@ class HomeAssistantCore(JobGroup):
             )
             await self.install_landingpage()
         else:
-            self.sys_homeassistant.version = self.instance.version or version
-            self.sys_homeassistant.set_image(self.instance.image)
+            if override_satisfied:
+                # A locally satisfiable override is authoritative (#706): never
+                # rewrite the stored image/version from whatever container we
+                # happened to attach to (e.g. one still running the old image).
+                _LOGGER.info(
+                    "Using Home Assistant image override %s with version %s",
+                    self.sys_homeassistant.image,
+                    version,
+                )
+            else:
+                self.sys_homeassistant.version = self.instance.version or version
+                self.sys_homeassistant.set_image(self.instance.image)
             await self.sys_homeassistant.save_data()
 
         # Start landingpage
@@ -121,6 +146,33 @@ class HomeAssistantCore(JobGroup):
         if not await self.instance.is_running():
             with suppress(HomeAssistantError):
                 await self.start()
+
+    async def _ensure_override_image(self, version: AwesomeVersion) -> bool:
+        """Ensure the user-overridden Core image is usable at `version` (#706).
+
+        Return True if the override image:version is available locally
+        (pulling it if necessary). If it is neither present locally nor
+        pullable, abandon the override LOUDLY and return False so the default
+        reconciliation (fleet self-heal) takes over.
+        """
+        image = self.sys_homeassistant.image
+        if await self.instance.exists(version=version):
+            return True
+
+        try:
+            await self.instance.install(version, image=image)
+        except DockerError:
+            _LOGGER.warning(
+                "Abandoning Home Assistant image override: %s with tag %s is"
+                " neither available locally nor pullable - falling back to the"
+                " default image %s",
+                image,
+                version,
+                self.sys_homeassistant.default_image,
+            )
+            self.sys_homeassistant.override_image = False
+            return False
+        return True
 
     @Job(
         name="home_assistant_core_install_landing_page",
@@ -248,6 +300,16 @@ class HomeAssistantCore(JobGroup):
             )
 
         old_image = self.sys_homeassistant.image
+        # Honour a stored per-device image override (#706): update within the
+        # overridden image instead of re-deriving the target from the updater.
+        if self.sys_homeassistant.override_image:
+            update_image: str | None = self.sys_homeassistant.image
+            _LOGGER.info(
+                "Home Assistant image override is set, updating with image %s",
+                update_image,
+            )
+        else:
+            update_image = self.sys_updater.image_homeassistant
         rollback = self.sys_homeassistant.version if not self.error_state else None
         running = await self.instance.is_running()
         exists = await self.instance.exists()
@@ -273,16 +335,14 @@ class HomeAssistantCore(JobGroup):
             """Run Home Assistant update."""
             _LOGGER.info("Updating Home Assistant to version %s", to_version)
             try:
-                await self.instance.update(
-                    to_version, image=self.sys_updater.image_homeassistant
-                )
+                await self.instance.update(to_version, image=update_image)
             except DockerError as err:
                 raise HomeAssistantUpdateError(
                     "Updating Home Assistant image failed", _LOGGER.warning
                 ) from err
 
             self.sys_homeassistant.version = self.instance.version or to_version
-            self.sys_homeassistant.set_image(self.sys_updater.image_homeassistant)
+            self.sys_homeassistant.set_image(update_image)
 
             if running:
                 await self.start()

@@ -464,10 +464,17 @@ class DockerInterface(JobGroup, ABC):
 
         self._meta = docker_image
 
-    async def exists(self) -> bool:
-        """Return True if Docker image exists in local repository."""
+    async def exists(self, version: AwesomeVersion | None = None) -> bool:
+        """Return True if Docker image exists in local repository.
+
+        By default the version from container/image metadata is checked. Pass
+        `version` explicitly to check a specific tag (e.g. the stored
+        user-override version before any container was created from it, #706).
+        """
+        if version is None:
+            version = self.version
         with suppress(aiodocker.DockerError, requests.RequestException):
-            await self.sys_docker.images.inspect(f"{self.image}:{self.version!s}")
+            await self.sys_docker.images.inspect(f"{self.image}:{version!s}")
             return True
         return False
 
