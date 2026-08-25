@@ -1,4 +1,9 @@
 aiodns==3.5.0
+# aiodns 3.5.0 type-references pycares 4.x symbols (ares_query_a_result);
+# unpinned pip resolves pycares 5.x and EVERY import of aiodns dies with an
+# AttributeError — which killed the whole test suite at collection. Pin the
+# newest compatible 4.x until aiodns is bumped.
+pycares==4.11.0
 aiodocker==0.24.0
 aiohttp==3.13.2
 atomicwrites-homeassistant==1.4.1

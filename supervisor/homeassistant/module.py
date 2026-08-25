@@ -182,7 +182,20 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
 
     @property
     def default_image(self) -> str:
-        """Return the default image for this system."""
+        """Return the default image for this system.
+
+        2025.11.4.5: reverted the greenautarky-prefixed return. The patch
+        was load-bearing only while Core was a GA fork
+        (memory: 'Supervisor default_image Gotcha — RESOLVED 2026-03-10').
+        V1.2-clean uses STOCK upstream Core
+        (memory: 'v1.2-clean: stock Core image + minimal supervisor'),
+        so the default must match what the OS bake actually ships:
+        the upstream-namespaced image. Without this revert, every
+        fresh-flash device hits 'No version found for
+        ghcr.io/greenautarky/<machine>-homeassistant' and falls into a
+        stuck landingpage pull. Found 2026-06-01 evening on the bench
+        reflash.
+        """
         return f"ghcr.io/home-assistant/{self.sys_machine}-homeassistant"
 
     @property
