@@ -97,11 +97,17 @@ jobs:
           echo "Version label:        ${VERSION_LABEL}"
           echo "Tags to publish:      ${TAGS}"
 
-      - name: Build and push
+      # ORDER IS LOAD-BEARING: build → scan → push. The image is built and LOADED
+      # locally (armv7 is single-platform, so --load works) but NOT pushed yet —
+      # the CVE gate below decides whether this image is allowed out. An earlier
+      # version pushed and scanned after, which scans nothing you can un-ship.
+      # Template: greenautarky/ga-addon-base/.github/workflows/build.yaml.
+      - name: Build (load, no push yet)
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          load: true
+          push: false
           no-cache: true
           platforms: linux/arm/v7
           build-args: |
@@ -117,4 +123,66 @@ jobs:
             org.opencontainers.image.source=https://github.com/greenautarky/ha-supervisor
             org.greenautarky.build-mode=${{ steps.meta.outputs.mode }}
             org.greenautarky.staging-tag=${{ steps.meta.outputs.staging_tag }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: local/armv7-hassio-supervisor:scan
+
+      # CVE GATE on the DISTRO layer. The base is whatever build.yaml declares
+      # and the "Resolve base image" step above resolved — deliberately NOT named
+      # here. An earlier version of this comment stated the base as a literal,
+      # and #22 had already replaced that literal with the resolver; a comment
+      # naming a base the workflow does not use is a defect that reads like
+      # context.
+      #
+      # A fixable HIGH/CRITICAL in the distro layer means a patched package
+      # exists, so a rebuild fixes it — we FAIL and the image is NOT pushed.
+      # `--ignore-unfixed` so a distro CVE with no fix yet cannot wedge the build
+      # permanently. Scans the LOCAL image loaded above, before it exists in any
+      # registry.
+      #
+      # Through scripts/cve-gate.sh, NOT a bare trivy call: `trivy image
+      # --exit-code 1` returns SUCCESS when it matches ZERO packages, so an image
+      # trivy has no matcher for passes as clean. The gate counts what was
+      # actually evaluated and exits 2 — BROKEN SCAN, never a pass — when that is
+      # zero. Vendored byte-identically from greenautarky/ha-operating-system,
+      # which the script names as its canonical home; the fixtures in
+      # tests/gates/cve-gate/ re-prove it red AND green on every change.
+      - name: CVE GATE — distro packages (fixable HIGH/CRITICAL block the push)
+        run: scripts/cve-gate.sh local/armv7-hassio-supervisor:scan
+
+      # REPORT the Python / bundled library layer for visibility, but never block
+      # the push on it — those are fixable only when their upstreams rebuild, not
+      # on our schedule.
+      - name: CVE report — bundled libraries (visibility, non-gating)
+        if: always()
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --scanners vuln --pkg-types library \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 --no-progress \
+            local/armv7-hassio-supervisor:scan
+
+      # Reached only if the CVE gate passed. Tag + push the vetted image to every
+      # tag the meta step decided on (staging ci-tag, and in RELEASE mode also the
+      # version tag + latest).
+      - name: Push (gate passed — publish the vetted image)
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra TAGS <<< "${{ steps.meta.outputs.tags }}"
+          pushed=0
+          for t in "${TAGS[@]}"; do
+            [ -z "$t" ] && continue
+            docker tag local/armv7-hassio-supervisor:scan "$t"
+            docker push "$t"
+            pushed=$((pushed + 1))
+          done
+          # The meta step always produces at least one tag for the events this
+          # workflow runs on. A zero here means the tag list arrived empty and we
+          # would have published NOTHING while reporting success — a green run
+          # that shipped no image is the hardest kind of failure to notice,
+          # because everything downstream simply keeps using yesterday's image.
+          # The sibling pipelines already fail closed on this; this one did not.
+          if [ "$pushed" -eq 0 ]; then
+            echo "::error::no tags resolved from the meta step - nothing was pushed"
+            exit 1
+          fi
+          echo "Pushed $pushed tag(s)."
