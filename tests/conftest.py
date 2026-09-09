@@ -6,6 +6,18 @@ from datetime import datetime
 import os
 from pathlib import Path
 import subprocess
+
+# Imported for its side effect, never used here.
+#
+# When an object is garbage-collected with a pending exception, pytest's
+# unraisable hook reports it — and reaches for tracemalloc lazily to add an
+# allocation traceback. That import writes a bytecode cache, blockbuster flags
+# the write as a blocking call, and the REPORT dies with "Failed to process
+# unraisable exception". The original exception is then never printed: CI shows
+# two ERRORs in whichever tests ran next and nothing about what actually
+# happened. Importing it up front, before the event loop and before blockbuster
+# is armed, keeps the reporting path working so a real failure stays readable.
+import tracemalloc  # noqa: F401
 from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
 from uuid import uuid4
 
