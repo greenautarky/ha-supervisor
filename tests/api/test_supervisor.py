@@ -407,3 +407,40 @@ async def test_api_progress_updates_supervisor_update(
             "done": True,
         },
     ]
+
+
+# Fields required by aiohasupervisor 0.6.0 `SupervisorInfo` — see the note in
+# tests/api/test_homeassistant.py. Pinned constant, never derived from the
+# response under test.
+CORE_2026_REQUIRED_SUPERVISOR_INFO_FIELDS = {
+    "arch",
+    "auto_update",
+    "channel",
+    "country",
+    "debug",
+    "debug_block",
+    "detect_blocking_io",
+    "diagnostics",
+    "feature_flags",
+    "healthy",
+    "ip_address",
+    "logging",
+    "supported",
+    "timezone",
+    "update_available",
+    "version",
+    "version_latest",
+}
+
+
+async def test_api_supervisor_info_serves_core_2026_contract(api_client: TestClient):
+    """/supervisor/info must serve every field aiohasupervisor 0.6.0 requires."""
+    resp = await api_client.get("/supervisor/info")
+    result = await resp.json()
+
+    missing = CORE_2026_REQUIRED_SUPERVISOR_INFO_FIELDS - set(result["data"])
+    assert not missing, f"SupervisorInfo fields missing from response: {missing}"
+
+    # This fork carries no experimental feature toggles, so the honest answer is
+    # "no feature flags exist here" — an empty mapping, not an invented flag.
+    assert result["data"]["feature_flags"] == {}

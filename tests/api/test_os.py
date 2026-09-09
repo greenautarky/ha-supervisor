@@ -507,3 +507,32 @@ async def test_api_config_swap_old_os(
         },
     )
     assert resp.status == 404
+
+
+# Fields required by aiohasupervisor 0.6.0 `OSInfo` — see the note in
+# tests/api/test_homeassistant.py. Pinned constant, never derived from the
+# response under test.
+CORE_2026_REQUIRED_OS_INFO_FIELDS = {
+    "board",
+    "boot",
+    "boot_slots",
+    "data_disk",
+    "update_available",
+    "version",
+    "version_latest",
+    "version_pending",
+}
+
+
+async def test_api_os_info_serves_core_2026_contract(api_client: TestClient):
+    """/os/info must serve every field aiohasupervisor 0.6.0 requires."""
+    resp = await api_client.get("/os/info")
+    result = await resp.json()
+
+    missing = CORE_2026_REQUIRED_OS_INFO_FIELDS - set(result["data"])
+    assert not missing, f"OSInfo fields missing from response: {missing}"
+
+    # This fork reboots straight after a successful RAUC install
+    # (OSManager.update), so it never holds an installed-but-not-yet-activated
+    # OS version. `None` is the measured truth here, not a placeholder.
+    assert result["data"]["version_pending"] is None

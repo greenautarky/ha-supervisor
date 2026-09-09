@@ -49,6 +49,7 @@ async def test_api_network_info(api_client: TestClient, coresys: CoreSys):
                 "method": "disabled",
                 "nameservers": [],
                 "ready": False,
+                "route_metric": None,
             }
             assert interface["ipv6"] == {
                 "addr_gen_mode": "default",
@@ -58,6 +59,7 @@ async def test_api_network_info(api_client: TestClient, coresys: CoreSys):
                 "method": "disabled",
                 "nameservers": [],
                 "ready": False,
+                "route_metric": None,
             }
 
     assert result["data"]["docker"]["interface"] == DOCKER_NETWORK
@@ -462,3 +464,39 @@ async def test_network_interface_not_found(
     assert resp.status == 404
     body = await resp.json()
     assert body["message"] == "Interface bad does not exist"
+
+
+# Fields required by aiohasupervisor 0.6.0 `IPv4` / `IPv6` — see the note in
+# tests/api/test_homeassistant.py. Pinned constants, never derived from the
+# response under test.
+CORE_2026_REQUIRED_IPV4_FIELDS = {
+    "address",
+    "gateway",
+    "method",
+    "nameservers",
+    "ready",
+    "route_metric",
+}
+CORE_2026_REQUIRED_IPV6_FIELDS = CORE_2026_REQUIRED_IPV4_FIELDS | {
+    "addr_gen_mode",
+    "ip6_privacy",
+}
+
+
+async def test_api_network_info_serves_core_2026_contract(api_client: TestClient):
+    """/network/info interfaces must serve every field aiohasupervisor 0.6.0 requires."""
+    resp = await api_client.get("/network/info")
+    result = await resp.json()
+
+    assert result["data"]["interfaces"], "no interfaces in response, nothing asserted"
+    for interface in result["data"]["interfaces"]:
+        for key, required in (
+            ("ipv4", CORE_2026_REQUIRED_IPV4_FIELDS),
+            ("ipv6", CORE_2026_REQUIRED_IPV6_FIELDS),
+        ):
+            if interface[key] is None:
+                continue
+            missing = required - set(interface[key])
+            assert not missing, (
+                f"{interface['interface']} {key} fields missing from response: {missing}"
+            )

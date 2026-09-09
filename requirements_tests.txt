@@ -1,3 +1,9 @@
+# Pinned to the version Home Assistant Core pins in
+# homeassistant/components/hassio/manifest.json for the Core release we
+# target. Bump it together with that target, never on its own: this pin is
+# what tests/api/test_core_client_contract.py holds our API against.
+# Measured 2026-09-09: Core 2026.8.2 AND 2026.9.1 both pin 0.6.0.
+aiohasupervisor==0.6.0
 astroid==4.0.2
 coverage==7.12.0
 mypy==1.18.2

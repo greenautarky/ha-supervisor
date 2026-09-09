@@ -22,6 +22,7 @@ from ..const import (
     ATTR_DEBUG_BLOCK,
     ATTR_DETECT_BLOCKING_IO,
     ATTR_DIAGNOSTICS,
+    ATTR_FEATURE_FLAGS,
     ATTR_HEALTHY,
     ATTR_ICON,
     ATTR_IP_ADDRESS,
@@ -104,6 +105,13 @@ class APISupervisor(CoreSysAttributes):
             ATTR_AUTO_UPDATE: self.sys_updater.auto_update,
             ATTR_DETECT_BLOCKING_IO: BlockBusterManager.is_enabled(),
             ATTR_COUNTRY: self.sys_config.country,
+            # Required by aiohasupervisor 0.6.0, the client Core 2026.8.x pins.
+            # Upstream added a
+            # development feature-toggle system in 2026.04.1 (#6719) and reports
+            # every known flag with its state. This fork carries none of those
+            # toggles, so the honest answer is an empty mapping: no feature flag
+            # exists here, therefore none is enabled.
+            ATTR_FEATURE_FLAGS: {},
             # Depricated
             ATTR_WAIT_BOOT: self.sys_config.wait_boot,
             ATTR_ADDONS: [
