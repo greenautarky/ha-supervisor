@@ -19,6 +19,33 @@ import pytest
 from supervisor.plugins.dns import PluginDns
 
 
+class _FakeClock:
+    """Stands in for the `time` MODULE inside supervisor.plugins.dns.
+
+    Deliberately not `patch("supervisor.plugins.dns.time.sleep")`: that form
+    resolves supervisor.plugins.dns.time to the real stdlib module and patches
+    it PROCESS-WIDE, so asyncio's own clock gets the mock too. A side_effect
+    iterator then raises StopIteration in whatever unrelated code calls
+    time.monotonic() next — including inside garbage collection, where it
+    surfaces as an unraisable exception attributed to some other test entirely.
+    Patching the NAME in the module's namespace keeps it local.
+
+    Time advances only when the code under test sleeps, so the wait is driven
+    rather than waited out.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class _FakePath:
     """A path that answers is_file()/read_text() from a script, not a disk."""
 
@@ -45,13 +72,15 @@ def test_the_active_file_is_used_and_nothing_waits():
     """The happy path must not sleep at all."""
     fake = _FakePath(present=True, content="100.126.0.9\n")
 
+    clock = _FakeClock()
+
     with (
         patch("supervisor.plugins.dns.Path", return_value=fake),
-        patch("supervisor.plugins.dns.time.sleep") as sleep,
+        patch("supervisor.plugins.dns.time", clock),
     ):
         assert PluginDns._load_ga_ota_ip() == "100.126.0.9"
 
-    sleep.assert_not_called()
+    assert clock.sleeps == []
 
 
 def test_the_wait_is_bounded_and_then_falls_back():
@@ -61,18 +90,19 @@ def test_the_wait_is_bounded_and_then_falls_back():
     really waits is a test people delete.
     """
     fake = _FakePath(present=False)
-    clock = iter([0.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0])
+    clock = _FakeClock()
 
     with (
         patch("supervisor.plugins.dns.Path", return_value=fake),
-        patch("supervisor.plugins.dns.time.sleep") as sleep,
-        patch("supervisor.plugins.dns.time.monotonic", side_effect=lambda: next(clock)),
+        patch("supervisor.plugins.dns.time", clock),
         patch.object(PluginDns, "_read_ga_conf_value", return_value=None),
     ):
         result = PluginDns._load_ga_ota_ip()
 
-    # It gave up rather than looping forever, and it slept while trying.
-    assert sleep.called
+    # It gave up rather than looping forever, and it spent the whole budget
+    # doing so — asserting merely that it slept once would pass on a loop that
+    # gives up immediately.
+    assert sum(clock.sleeps) >= PluginDns._GA_OTA_ACTIVE_WAIT_S - max(clock.sleeps)
     # With no conf file to read, the last resort is the pinned constant.
     assert result == PluginDns._GA_HARDCODED_FALLBACK_IP
 
