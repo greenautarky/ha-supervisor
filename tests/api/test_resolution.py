@@ -214,3 +214,143 @@ async def test_check_not_found(api_client: TestClient, method: str, url: str):
     assert resp.status == 404
     body = await resp.json()
     assert body["message"] == "The supplied check slug is not available"
+
+
+# Fields required by aiohasupervisor 0.6.0 (the client Home Assistant Core
+# 2026.8.2 pins) for the models served by /resolution/info. Every field of
+# these mashumaro dataclasses is required — none carries a default — so a
+# missing key raises MissingField and stalls Core's bootstrap.
+#
+# Pinned constants, never derived from the response under test.
+#
+# These lists MUST be exercised against a non-empty resolution state: with
+# zero issues and zero suggestions the endpoint deserializes fine even when
+# the per-entry fields are missing, which is exactly how this gap survived
+# the earlier contract tests.
+CORE_2026_REQUIRED_RESOLUTION_INFO_FIELDS = {
+    "checks",
+    "issues",
+    "suggestions",
+    "unhealthy",
+    "unsupported",
+}
+CORE_2026_REQUIRED_ISSUE_FIELDS = {
+    "context",
+    "reference",
+    "reference_extra",
+    "type",
+    "uuid",
+}
+CORE_2026_REQUIRED_SUGGESTION_FIELDS = {
+    "auto",
+    "context",
+    "reference",
+    "reference_extra",
+    "type",
+    "uuid",
+}
+CORE_2026_REQUIRED_CHECK_FIELDS = {"enabled", "slug"}
+
+
+async def test_api_resolution_info_serves_core_2026_contract(
+    coresys: CoreSys, api_client: TestClient
+):
+    """/resolution/info must serve every field aiohasupervisor 0.6.0 requires."""
+    coresys.resolution.add_unsupported_reason(UnsupportedReason.OS)
+    coresys.resolution.add_unhealthy_reason(UnhealthyReason.DOCKER)
+    # An issue that carries suggestions, so both lists are populated the way
+    # they are on a device that actually has something to report.
+    coresys.resolution.create_issue(
+        IssueType.FREE_SPACE,
+        ContextType.SYSTEM,
+        suggestions=[SuggestionType.CLEAR_FULL_BACKUP],
+    )
+
+    resp = await api_client.get("/resolution/info")
+    result = await resp.json()
+    data = result["data"]
+
+    missing = CORE_2026_REQUIRED_RESOLUTION_INFO_FIELDS - set(data)
+    assert not missing, f"ResolutionInfo fields missing from response: {missing}"
+
+    # Fail closed on an empty fixture: a run over zero issues or zero
+    # suggestions inspects nothing and proves nothing.
+    assert data["issues"], "no issue in response - the contract check inspected nothing"
+    assert data["suggestions"], (
+        "no suggestion in response - the contract check inspected nothing"
+    )
+    assert data["checks"], "no check in response - the contract check inspected nothing"
+
+    for issue in data["issues"]:
+        missing = CORE_2026_REQUIRED_ISSUE_FIELDS - set(issue)
+        assert not missing, f"Issue fields missing from response: {missing}"
+    for suggestion in data["suggestions"]:
+        missing = CORE_2026_REQUIRED_SUGGESTION_FIELDS - set(suggestion)
+        assert not missing, f"Suggestion fields missing from response: {missing}"
+    for check in data["checks"]:
+        missing = CORE_2026_REQUIRED_CHECK_FIELDS - set(check)
+        assert not missing, f"Check fields missing from response: {missing}"
+
+    # Core reads the same Suggestion model from this endpoint, once per issue
+    # it received above.
+    resp = await api_client.get(
+        f"/resolution/issue/{data['issues'][0]['uuid']}/suggestions"
+    )
+    suggestions = (await resp.json())["data"]["suggestions"]
+    assert suggestions, (
+        "no suggestion for the issue - the contract check inspected nothing"
+    )
+    for suggestion in suggestions:
+        missing = CORE_2026_REQUIRED_SUGGESTION_FIELDS - set(suggestion)
+        assert not missing, (
+            f"Suggestion fields missing from suggestions_for_issue: {missing}"
+        )
+
+
+async def test_api_resolution_info_reference_extra_is_a_real_value(
+    coresys: CoreSys, api_client: TestClient
+):
+    """reference_extra carries the real payload, it is not a hardcoded None.
+
+    Also pins the inheritance upstream #6916 introduced: suggestions created
+    from an issue take that issue's reference_extra.
+    """
+    coresys.resolution.create_issue(
+        IssueType.FREE_SPACE,
+        ContextType.SYSTEM,
+        reference="test_reference",
+        suggestions=[SuggestionType.CLEAR_FULL_BACKUP],
+        reference_extra={"detail": 42},
+    )
+
+    resp = await api_client.get("/resolution/info")
+    data = (await resp.json())["data"]
+
+    issue = next(i for i in data["issues"] if i["reference"] == "test_reference")
+    assert issue["reference_extra"] == {"detail": 42}
+
+    suggestion = next(
+        s for s in data["suggestions"] if s["reference"] == "test_reference"
+    )
+    assert suggestion["reference_extra"] == {"detail": 42}
+
+
+async def test_api_resolution_info_reference_extra_defaults_to_none(
+    coresys: CoreSys, api_client: TestClient
+):
+    """An issue raised without extra detail reports None, not a stub value.
+
+    Must-pass fixture: nothing in this fork populates reference_extra today,
+    and the field must not invent one.
+    """
+    coresys.resolution.create_issue(
+        IssueType.FREE_SPACE,
+        ContextType.SYSTEM,
+        suggestions=[SuggestionType.CLEAR_FULL_BACKUP],
+    )
+
+    resp = await api_client.get("/resolution/info")
+    data = (await resp.json())["data"]
+
+    assert data["issues"][-1]["reference_extra"] is None
+    assert data["suggestions"][-1]["reference_extra"] is None

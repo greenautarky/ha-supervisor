@@ -187,9 +187,10 @@ class ResolutionManager(FileConfiguration, CoreSysAttributes):
         context: ContextType,
         reference: str | None = None,
         suggestions: list[SuggestionType] | None = None,
+        reference_extra: dict[str, Any] | None = None,
     ) -> None:
         """Create issues and suggestion."""
-        self.add_issue(Issue(issue, context, reference), suggestions)
+        self.add_issue(Issue(issue, context, reference, reference_extra), suggestions)
 
     def add_issue(
         self, issue: Issue, suggestions: list[SuggestionType] | None = None
@@ -198,7 +199,12 @@ class ResolutionManager(FileConfiguration, CoreSysAttributes):
         if suggestions:
             for suggestion in suggestions:
                 self.add_suggestion(
-                    Suggestion(suggestion, issue.context, issue.reference)
+                    Suggestion(
+                        suggestion,
+                        issue.context,
+                        issue.reference,
+                        issue.reference_extra,
+                    )
                 )
 
         if issue in self._issues:
@@ -298,6 +304,7 @@ class ResolutionManager(FileConfiguration, CoreSysAttributes):
             for fix in self.fixup.fixes_for_issue(issue)
             for suggestion in fix.all_suggestions
             if suggestion.reference == issue.reference
+            and suggestion.reference_extra == issue.reference_extra
         }
 
     def issues_for_suggestion(self, suggestion: Suggestion) -> set[Issue]:
@@ -307,4 +314,5 @@ class ResolutionManager(FileConfiguration, CoreSysAttributes):
             for fix in self.fixup.fixes_for_suggestion(suggestion)
             for issue in fix.all_issues
             if issue.reference == suggestion.reference
+            and issue.reference_extra == suggestion.reference_extra
         }
