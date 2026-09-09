@@ -429,9 +429,9 @@ class PluginDns(PluginBase):
     _GA_HARDCODED_FALLBACK_IP = "100.126.142.217"
 
     _GA_CONF_PATHS = (
-        Path("/mnt/data/ga-services.conf"),    # runtime override (persistent)
-        Path("/os/etc/ga-services.conf"),       # rootfs default (via host mount)
-        Path("/etc/ga-services.conf"),          # fallback (if running on host)
+        Path("/mnt/data/ga-services.conf"),  # runtime override (persistent)
+        Path("/os/etc/ga-services.conf"),  # rootfs default (via host mount)
+        Path("/etc/ga-services.conf"),  # fallback (if running on host)
     )
 
     @classmethod
@@ -448,7 +448,9 @@ class PluginDns(PluginBase):
     @classmethod
     def _load_ga_services_ip(cls) -> str:
         """Load GA_SERVICES_IP for influx/loki (NetBird-only direct backends)."""
-        return cls._read_ga_conf_value("GA_SERVICES_IP") or cls._GA_HARDCODED_FALLBACK_IP
+        return (
+            cls._read_ga_conf_value("GA_SERVICES_IP") or cls._GA_HARDCODED_FALLBACK_IP
+        )
 
     # Boot-race guard: if Supervisor starts before ga-resolve-ota.service
     # has populated /run/ga-resolve-ota.active, the fall-through to
@@ -481,8 +483,10 @@ class PluginDns(PluginBase):
           2. First IP in GA_OTA_IPS — same priority order ga-resolve-ota uses.
           3. GA_SERVICES_IP — last fallback before the hardcoded constant.
         """
-        candidate_paths = (Path("/run/ga-resolve-ota.active"),
-                           Path("/os/run/ga-resolve-ota.active"))
+        candidate_paths = (
+            Path("/run/ga-resolve-ota.active"),
+            Path("/os/run/ga-resolve-ota.active"),
+        )
 
         deadline = time.monotonic() + cls._GA_OTA_ACTIVE_WAIT_S
         while True:
@@ -512,9 +516,13 @@ class PluginDns(PluginBase):
     async def _init_hosts(self) -> None:
         """Import hosts entry."""
         # influx/loki always go to GA_SERVICES_IP (NetBird-only direct ports).
-        ga_ip = self._load_ga_services_ip()
+        # Both loaders stat and read ga-services.conf, so they run in the
+        # executor: this is the event loop, and blocking it here stalls every
+        # other Supervisor task (upstream's blockbuster guard fails the suite
+        # on it, which is how this was found).
+        ga_ip = await self.sys_run_in_executor(self._load_ga_services_ip)
         # ota uses the dynamic failover pick — same as the host /etc/hosts.
-        ga_ota_ip = self._load_ga_ota_ip()
+        ga_ota_ip = await self.sys_run_in_executor(self._load_ga_ota_ip)
         _LOGGER.info("GA services IP: %s, GA OTA IP: %s", ga_ip, ga_ota_ip)
 
         # Generate Default
@@ -534,7 +542,9 @@ class PluginDns(PluginBase):
             self.add_host(self.sys_docker.network.observer, ["observer"], write=False),
             self.add_host(IPv4Address(ga_ip), ["influx.greenautarky.com"], write=False),
             self.add_host(IPv4Address(ga_ip), ["loki.greenautarky.com"], write=False),
-            self.add_host(IPv4Address(ga_ota_ip), ["ota.greenautarky.com"], write=False),
+            self.add_host(
+                IPv4Address(ga_ota_ip), ["ota.greenautarky.com"], write=False
+            ),
         )
 
     async def write_hosts(self) -> None:

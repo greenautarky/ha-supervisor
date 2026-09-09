@@ -18,7 +18,9 @@ SUPERVISOR_DOCKER_NAME: str = f"{DOCKER_PREFIX}_supervisor"
 
 URL_HASSIO_ADDONS = "https://github.com/home-assistant/addons"
 URL_HASSIO_APPARMOR = "https://version.home-assistant.io/apparmor_{channel}.txt"
-URL_HASSIO_VERSION = "https://raw.githubusercontent.com/greenautarky/haos-version/main/{channel}.json"
+URL_HASSIO_VERSION = (
+    "https://raw.githubusercontent.com/greenautarky/haos-version/main/{channel}.json"
+)
 
 SUPERVISOR_DATA = Path("/data")
 

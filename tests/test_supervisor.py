@@ -71,7 +71,11 @@ async def test_connectivity_check_throttling(
         traveller.shift(call_interval)
         await coresys.supervisor.check_connectivity()
 
-    assert websession.head.call_count == (1 if throttled else 2)
+    # GA patch: when the primary check fails, a fallback HEAD follows, so a
+    # failing check costs two requests. The throttle is what is under test.
+    heads_per_check = 1 if side_effect is None else 2
+    executions = 1 if throttled else 2
+    assert websession.head.call_count == executions * heads_per_check
 
 
 async def test_update_failed(coresys: CoreSys, capture_exception: Mock):

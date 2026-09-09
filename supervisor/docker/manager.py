@@ -62,8 +62,8 @@ RE_IMPORT_IMAGE_STREAM = re.compile(r"(^Loaded image ID: |^Loaded image: )(.+)$"
 # Pull timeouts — protect against silent registry-stalls on flaky 4G/LTE links
 # that previously left HA-Core down indefinitely while supervisor self-update
 # blocked forever waiting for `docker pull` to make progress.
-PULL_STALL_TIMEOUT: Final = 90      # max seconds with no progress event
-PULL_TOTAL_TIMEOUT: Final = 1800    # absolute hard cap (30 min)
+PULL_STALL_TIMEOUT: Final = 90  # max seconds with no progress event
+PULL_TOTAL_TIMEOUT: Final = 1800  # absolute hard cap (30 min)
 
 
 @attr.s(frozen=True)

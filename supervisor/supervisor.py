@@ -303,9 +303,7 @@ class Supervisor(CoreSysAttributes):
                 primary_err,
             )
             try:
-                await self.sys_websession.head(
-                    "https://github.com", timeout=timeout
-                )
+                await self.sys_websession.head("https://github.com", timeout=timeout)
             except (ClientError, TimeoutError) as fallback_err:
                 _LOGGER.debug(
                     "Fallback connectivity check also failed: %s", fallback_err

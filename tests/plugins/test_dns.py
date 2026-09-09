@@ -13,9 +13,20 @@ from supervisor.coresys import CoreSys
 from supervisor.docker.const import ContainerState
 from supervisor.docker.dns import DockerDNS
 from supervisor.docker.monitor import DockerContainerStateEvent
-from supervisor.plugins.dns import HostEntry
+from supervisor.plugins.const import GA_DEFAULT_DNS_FALLBACK, GA_DEFAULT_DNS_SERVERS
+from supervisor.plugins.dns import HostEntry, PluginDns
 from supervisor.resolution.const import ContextType, IssueType, SuggestionType
 from supervisor.resolution.data import Issue, Suggestion
+
+# Resolved once, at import time. The plugin reads these from ga-services.conf,
+# which is blocking file I/O: calling the loaders inside a test would run it on
+# the event loop and trip the very guard that found the defect these entries
+# exist to describe. Derived from the plugin rather than pasted so a changed
+# default cannot make the expectation stale.
+# pylint: disable=protected-access
+GA_SERVICES_IP = PluginDns._load_ga_services_ip()
+GA_OTA_IP = PluginDns._load_ga_ota_ip()
+# pylint: enable=protected-access
 
 
 @pytest.fixture(name="docker_interface")
@@ -64,7 +75,7 @@ async def test_config_write(
         {
             "servers": ["dns://1.1.1.1", "dns://8.8.8.8"],
             "locals": ["dns://192.168.30.1"],
-            "fallback": True,
+            "fallback": GA_DEFAULT_DNS_FALLBACK,
             "debug": False,
         },
     )
@@ -103,8 +114,9 @@ async def test_reset(coresys: CoreSys):
     ):
         await coresys.plugins.dns.reset()
 
-        assert coresys.plugins.dns.servers == []
-        assert coresys.plugins.dns.fallback is True
+        # reset() returns the plugin to the GA factory state, not upstream's.
+        assert coresys.plugins.dns.servers == list(GA_DEFAULT_DNS_SERVERS)
+        assert coresys.plugins.dns.fallback is GA_DEFAULT_DNS_FALLBACK
         assert coresys.plugins.dns._loop is False  # pylint: disable=protected-access
         unlink.assert_called_once()
         write_hosts.assert_called_once()
@@ -141,6 +153,27 @@ async def test_reset(coresys: CoreSys):
             HostEntry(
                 ip_address=IPv4Address("172.30.32.6"),
                 names=["observer", "observer.local.hass.io"],
+            ),
+            HostEntry(
+                ip_address=IPv4Address(GA_SERVICES_IP),
+                names=[
+                    "influx.greenautarky.com",
+                    "influx.greenautarky.com.local.hass.io",
+                ],
+            ),
+            HostEntry(
+                ip_address=IPv4Address(GA_SERVICES_IP),
+                names=[
+                    "loki.greenautarky.com",
+                    "loki.greenautarky.com.local.hass.io",
+                ],
+            ),
+            HostEntry(
+                ip_address=IPv4Address(GA_OTA_IP),
+                names=[
+                    "ota.greenautarky.com",
+                    "ota.greenautarky.com.local.hass.io",
+                ],
             ),
         ]
 
