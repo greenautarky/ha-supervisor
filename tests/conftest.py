@@ -51,6 +51,7 @@ from supervisor.exceptions import HostLogError
 from supervisor.homeassistant.api import APIState
 from supervisor.host.logs import LogsControl
 from supervisor.os.manager import OSManager
+from supervisor.plugins.dns import PluginDns
 from supervisor.store.addon import AddonStore
 from supervisor.store.repository import Repository
 from supervisor.utils.dt import utcnow
@@ -78,6 +79,25 @@ from tests.dbus_service_mocks.network_active_connection import (
 )
 
 # pylint: disable=redefined-outer-name, protected-access
+
+
+@pytest.fixture(autouse=True)
+def ga_ota_active_no_wait():
+    """Do not wait fifteen seconds for a device file that cannot exist here.
+
+    PluginDns._load_ga_ota_ip polls /run/ga-resolve-ota.active for up to
+    _GA_OTA_ACTIVE_WAIT_S seconds, which is right on a device — the file appears
+    within about a second and the wait closes a real boot race. Under test the
+    file never appears, so every call burns the full budget and the suite spends
+    minutes asleep.
+
+    This patches the ENVIRONMENT, not the subject: what the DNS tests assert is
+    which host entries _init_hosts produces, never how long it is willing to
+    wait. The waiting itself is asserted on purpose in
+    tests/plugins/test_dns_ota_wait.py, which opts out of this fixture.
+    """
+    with patch.object(PluginDns, "_GA_OTA_ACTIVE_WAIT_S", 0):
+        yield
 
 
 @pytest.fixture(autouse=True)
