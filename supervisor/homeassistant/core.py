@@ -101,7 +101,30 @@ class HomeAssistantCore(JobGroup):
             override_satisfied = False
             if self.sys_homeassistant.override_image:
                 override_satisfied = await self._ensure_override_image(version)
-            if not override_satisfied:
+            keep_upstream = False
+            if (
+                not override_satisfied
+                and self.sys_homeassistant.image
+                == self.sys_homeassistant.upstream_image
+                != self.sys_homeassistant.default_image
+                and await self.instance.exists(version=version)
+            ):
+                # The channel moved Core to another image (armv7: the GA build,
+                # 2026-09-28), but this device still runs the upstream image it
+                # installed earlier. Reconciling here would remove the running
+                # image and pull default:version — a tag that does not exist
+                # for an older version — and drop the device to the landing
+                # page on a plain restart. Keep it; the next Core update pulls
+                # from the channel image and switches over.
+                keep_upstream = True
+                _LOGGER.warning(
+                    "Keeping Home Assistant image %s:%s. The channel names %s;"
+                    " it takes over at the next Core update.",
+                    self.sys_homeassistant.image,
+                    version,
+                    self.sys_homeassistant.default_image,
+                )
+            if not override_satisfied and not keep_upstream:
                 if self.sys_homeassistant.image != self.sys_homeassistant.default_image:
                     # Loud fallback (#706): reconciling away from a non-default
                     # stored image must never happen silently.

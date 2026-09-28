@@ -196,6 +196,27 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
         ghcr.io/greenautarky/<machine>-homeassistant' and falls into a
         stuck landingpage pull. Found 2026-06-01 evening on the bench
         reflash.
+
+        The channel decides (2026-09-28): upstream stopped building Core for
+        armv7 in late 2025, so on this hardware a current Core only exists as
+        the GA armv7 build. The channel's version.json already names the Core
+        image (`images.core`, cached by the updater) and install/update pull
+        from it — while load() reconciled every restart back to this
+        hardcoded upstream name, which does not exist at a 2026 tag. Two
+        sources for one truth; the channel is now the only one. The upstream
+        name remains the fallback for a device that has never read a channel.
+        """
+        if image := self.sys_updater.image_homeassistant:
+            return image
+        return self.upstream_image
+
+    @property
+    def upstream_image(self) -> str:
+        """Return the upstream-namespaced Core image for this machine.
+
+        The default before the channel decided (see default_image). A device
+        that installed Core before its channel moved to another image still
+        runs this one, and load() must not tear it down on a restart.
         """
         return f"ghcr.io/home-assistant/{self.sys_machine}-homeassistant"
 
