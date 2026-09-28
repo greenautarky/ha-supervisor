@@ -712,3 +712,83 @@ async def test_core_loads_wrong_image_for_architecture(
     assert (
         coresys.homeassistant.image == "ghcr.io/home-assistant/qemux86-64-homeassistant"
     )
+
+
+GA_CORE_IMAGE = "ghcr.io/greenautarky/home-assistant-armv7"
+
+
+def _channel_names_core_image(coresys: CoreSys, image: str) -> None:
+    """Simulate a fetched channel version.json whose images.core is `image`."""
+    coresys.updater._data["image"]["homeassistant"] = image  # noqa: SLF001
+
+
+async def test_default_image_follows_channel(coresys: CoreSys):
+    """The channel's images.core is the default Core image (2026-09-28)."""
+    assert (
+        coresys.homeassistant.default_image
+        == "ghcr.io/home-assistant/qemux86-64-homeassistant"
+    )
+    _channel_names_core_image(coresys, GA_CORE_IMAGE)
+    assert coresys.homeassistant.default_image == GA_CORE_IMAGE
+    _channel_names_core_image(coresys, "ghcr.io/home-assistant/{machine}-homeassistant")
+    assert (
+        coresys.homeassistant.default_image
+        == "ghcr.io/home-assistant/qemux86-64-homeassistant"
+    )
+
+
+async def test_core_load_keeps_running_upstream_image_when_channel_moves(
+    coresys: CoreSys, container: MagicMock, caplog: pytest.LogCaptureFixture
+):
+    """A device still on the upstream image is not torn down on restart.
+
+    The channel names the GA image, which has no tag for the old version.
+    Reconciling would remove the running image and pull GA:2025.11.3, which
+    does not exist, and leave the device on the landing page.
+    """
+    coresys.homeassistant.set_image("ghcr.io/home-assistant/qemux86-64-homeassistant")
+    coresys.homeassistant.version = AwesomeVersion("2025.11.3")
+    container.status = "running"
+    container.attrs["Config"] = {"Labels": {"io.hass.version": "2025.11.3"}}
+    _channel_names_core_image(coresys, GA_CORE_IMAGE)
+
+    await coresys.homeassistant.core.load()
+
+    assert "takes over at the next Core update" in caplog.text
+    container.remove.assert_not_called()
+    coresys.docker.images.delete.assert_not_called()
+    coresys.docker.images.pull.assert_not_called()
+    assert (
+        coresys.homeassistant.image == "ghcr.io/home-assistant/qemux86-64-homeassistant"
+    )
+    assert coresys.homeassistant.version == AwesomeVersion("2025.11.3")
+
+
+async def test_core_load_reconciles_to_channel_image_when_upstream_absent(
+    coresys: CoreSys, container: MagicMock
+):
+    """Without the upstream image locally, load() reconciles to the channel image."""
+    coresys.homeassistant.set_image("ghcr.io/home-assistant/qemux86-64-homeassistant")
+    coresys.homeassistant.version = AwesomeVersion("2026.8.2")
+    container.attrs["Config"] = {"Labels": {"io.hass.version": "2026.8.2"}}
+    _channel_names_core_image(coresys, GA_CORE_IMAGE)
+
+    good_image = {
+        "Os": "linux",
+        "Architecture": "amd64",
+        "Id": "abc123",
+        "Config": {"Labels": {"io.hass.version": "2026.8.2"}},
+    }
+
+    async def mock_inspect(name: str):
+        if name.startswith("ghcr.io/home-assistant/"):
+            raise aiodocker.DockerError(
+                HTTPStatus.NOT_FOUND, {"message": "no such image"}
+            )
+        return good_image
+
+    coresys.docker.images.inspect.side_effect = mock_inspect
+
+    await coresys.homeassistant.core.load()
+
+    assert coresys.homeassistant.image == GA_CORE_IMAGE
