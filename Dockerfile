@@ -50,6 +50,19 @@ RUN \
     && chmod a+x /usr/bin/cosign \
     && pip3 install uv==0.8.9
 
+# tempio from its current release (the base image carries an older build that
+# nothing in this image calls, but it ships, so it is kept current rather than
+# removed from what the base provides). Checksum-pinned; only the armv7 binary
+# is pinned because only armv7 is built from this fork.
+ARG TEMPIO_VERSION=2026.07.0
+ARG TEMPIO_SHA256=1887c4721317ee166de703ddb30f906c9f98f01f08a6b2da295c10946a0c8110
+RUN \
+    curl -Lfso /usr/bin/tempio "https://github.com/home-assistant/tempio/releases/download/${TEMPIO_VERSION}/tempio_${BUILD_ARCH}" \
+    && echo "${TEMPIO_SHA256}  /usr/bin/tempio" > /tmp/tempio.sha256 \
+    && sha256sum -c /tmp/tempio.sha256 \
+    && rm -f /tmp/tempio.sha256 \
+    && chmod a+x /usr/bin/tempio
+
 # Install requirements
 COPY requirements.txt .
 RUN \
