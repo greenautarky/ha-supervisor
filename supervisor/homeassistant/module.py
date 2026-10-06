@@ -13,7 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from awesomeversion import AwesomeVersion, AwesomeVersionException
-from securetar import AddFileError, atomic_contents_add, secure_path
+from securetar import AddFileError, atomic_contents_add
 import voluptuous as vol
 from voluptuous.humanize import humanize_error
 
@@ -23,6 +23,7 @@ from ..const import (
     ATTR_AUDIO_OUTPUT,
     ATTR_BACKUPS_EXCLUDE_DATABASE,
     ATTR_BOOT,
+    ATTR_DUPLICATE_LOG_FILE,
     ATTR_IMAGE,
     ATTR_MESSAGE,
     ATTR_PORT,
@@ -39,6 +40,7 @@ from ..const import (
 )
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import (
+    BackupInvalidError,
     ConfigurationFileError,
     HomeAssistantBackupError,
     HomeAssistantError,
@@ -182,8 +184,42 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
 
     @property
     def default_image(self) -> str:
-        """Return the default image for this system."""
-        return f"ghcr.io/greenautarky/{self.sys_machine}-homeassistant"
+        """Return the default image for this system.
+
+        2025.11.4.5: reverted the greenautarky-prefixed return. The patch
+        was load-bearing only while Core was a GA fork
+        (memory: 'Supervisor default_image Gotcha — RESOLVED 2026-03-10').
+        V1.2-clean uses STOCK upstream Core
+        (memory: 'v1.2-clean: stock Core image + minimal supervisor'),
+        so the default must match what the OS bake actually ships:
+        the upstream-namespaced image. Without this revert, every
+        fresh-flash device hits 'No version found for
+        ghcr.io/greenautarky/<machine>-homeassistant' and falls into a
+        stuck landingpage pull. Found 2026-06-01 evening on the bench
+        reflash.
+
+        The channel decides (2026-09-28): upstream stopped building Core for
+        armv7 in late 2025, so on this hardware a current Core only exists as
+        the GA armv7 build. The channel's version.json already names the Core
+        image (`images.core`, cached by the updater) and install/update pull
+        from it — while load() reconciled every restart back to this
+        hardcoded upstream name, which does not exist at a 2026 tag. Two
+        sources for one truth; the channel is now the only one. The upstream
+        name remains the fallback for a device that has never read a channel.
+        """
+        if image := self.sys_updater.image_homeassistant:
+            return image
+        return self.upstream_image
+
+    @property
+    def upstream_image(self) -> str:
+        """Return the upstream-namespaced Core image for this machine.
+
+        The default before the channel decided (see default_image). A device
+        that installed Core before its channel moved to another image still
+        runs this one, and load() must not tear it down on a restart.
+        """
+        return f"ghcr.io/home-assistant/{self.sys_machine}-homeassistant"
 
     @property
     def image(self) -> str:
@@ -298,6 +334,16 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
     def backups_exclude_database(self, value: bool) -> None:
         """Set whether backups should exclude database by default."""
         self._data[ATTR_BACKUPS_EXCLUDE_DATABASE] = value
+
+    @property
+    def duplicate_log_file(self) -> bool:
+        """Return True if Home Assistant should duplicate logs to file."""
+        return self._data[ATTR_DUPLICATE_LOG_FILE]
+
+    @duplicate_log_file.setter
+    def duplicate_log_file(self, value: bool) -> None:
+        """Set whether Home Assistant should duplicate logs to file."""
+        self._data[ATTR_DUPLICATE_LOG_FILE] = value
 
     async def load(self) -> None:
         """Prepare Home Assistant object."""
@@ -475,11 +521,16 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
                 # extract backup
                 try:
                     with tar_file as backup:
+                        # The tar filter rejects path traversal and absolute names,
+                        # aborting restore of potentially crafted backups.
                         backup.extractall(
                             path=temp_path,
-                            members=secure_path(backup),
-                            filter="fully_trusted",
+                            filter="tar",
                         )
+                except tarfile.FilterError as err:
+                    raise BackupInvalidError(
+                        f"Invalid tarfile {tar_file}: {err}", _LOGGER.error
+                    ) from err
                 except tarfile.TarError as err:
                     raise HomeAssistantError(
                         f"Can't read tarfile {tar_file}: {err}", _LOGGER.error

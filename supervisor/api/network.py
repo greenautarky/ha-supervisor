@@ -36,6 +36,7 @@ from ..const import (
     ATTR_PRIMARY,
     ATTR_PSK,
     ATTR_READY,
+    ATTR_ROUTE_METRIC,
     ATTR_SIGNAL,
     ATTR_SSID,
     ATTR_SUPERVISOR_INTERNET,
@@ -113,6 +114,7 @@ def ip4config_struct(config: IpConfig, setting: IpSetting) -> dict[str, Any]:
         ATTR_ADDRESS: [address.with_prefixlen for address in config.address],
         ATTR_NAMESERVERS: [str(address) for address in config.nameservers],
         ATTR_GATEWAY: str(config.gateway) if config.gateway else None,
+        ATTR_ROUTE_METRIC: setting.route_metric,
         ATTR_READY: config.ready,
     }
 
@@ -126,6 +128,7 @@ def ip6config_struct(config: IpConfig, setting: Ip6Setting) -> dict[str, Any]:
         ATTR_ADDRESS: [address.with_prefixlen for address in config.address],
         ATTR_NAMESERVERS: [str(address) for address in config.nameservers],
         ATTR_GATEWAY: str(config.gateway) if config.gateway else None,
+        ATTR_ROUTE_METRIC: setting.route_metric,
         ATTR_READY: config.ready,
     }
 

@@ -14,6 +14,7 @@ from ..homeassistant.const import LANDINGPAGE
 from ..jobs.const import JobConcurrency
 from ..jobs.decorator import Job
 from .const import (
+    ENV_DUPLICATE_LOG_FILE,
     ENV_TIME,
     ENV_TOKEN,
     ENV_TOKEN_OLD,
@@ -171,6 +172,11 @@ class DockerHomeAssistant(DockerInterface):
             ENV_TIME: self.sys_timezone,
             ENV_TOKEN: self.sys_homeassistant.supervisor_token,
             ENV_TOKEN_OLD: self.sys_homeassistant.supervisor_token,
+            **(
+                {ENV_DUPLICATE_LOG_FILE: "1"}
+                if self.sys_homeassistant.duplicate_log_file
+                else {}
+            ),
         }
         if restore_job_id:
             environment[ENV_RESTORE_JOB_ID] = restore_job_id

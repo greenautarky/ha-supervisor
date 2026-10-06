@@ -9,7 +9,7 @@ from typing import NotRequired, Self, TypedDict
 
 from aiohttp import __version__ as aiohttpversion
 
-SUPERVISOR_VERSION = "2025.11.5.2"
+SUPERVISOR_VERSION = "2025.11.5.6"
 SERVER_SOFTWARE = f"HomeAssistantSupervisor/{SUPERVISOR_VERSION} aiohttp/{aiohttpversion} Python/{systemversion[0]}.{systemversion[1]}"
 
 DOCKER_PREFIX: str = "hassio"
@@ -18,15 +18,9 @@ SUPERVISOR_DOCKER_NAME: str = f"{DOCKER_PREFIX}_supervisor"
 
 URL_HASSIO_ADDONS = "https://github.com/home-assistant/addons"
 URL_HASSIO_APPARMOR = "https://version.home-assistant.io/apparmor_{channel}.txt"
-# GreenAutarky V1.2-clean WIP pointer: the V1.2-clean version chain
-# (stock Core + this minimal supervisor) lives on the
-# release/v1.2-rebuild branch of greenautarky/haos-version.
-# haos-version's main branch is still the live v1.1 chain (GA-fork
-# Core + supervisor 2025.11.4.1) — fetching main here would make a
-# V1.2-clean device install the fork Core. Mirrors ha-operating-system
-# hassio.mk HASSIO_VERSION_URL (pointed at release/v1.2-rebuild in 87d61e58).
-# Revert to main/ when release/v1.2-rebuild merges at the V1.2 promote.
-URL_HASSIO_VERSION = "https://raw.githubusercontent.com/greenautarky/haos-version/release/v1.2-rebuild/{channel}.json"
+URL_HASSIO_VERSION = (
+    "https://raw.githubusercontent.com/greenautarky/haos-version/main/{channel}.json"
+)
 
 SUPERVISOR_DATA = Path("/data")
 
@@ -181,6 +175,7 @@ ATTR_DISK_LED = "disk_led"
 ATTR_DISK_LIFE_TIME = "disk_life_time"
 ATTR_DISK_TOTAL = "disk_total"
 ATTR_DISK_USED = "disk_used"
+ATTR_DUPLICATE_LOG_FILE = "duplicate_log_file"
 ATTR_DISPLAYNAME = "displayname"
 ATTR_DNS = "dns"
 ATTR_DOCKER = "docker"
@@ -195,6 +190,7 @@ ATTR_ENVIRONMENT = "environment"
 ATTR_EVENT = "event"
 ATTR_EXCLUDE_DATABASE = "exclude_database"
 ATTR_EXTRA = "extra"
+ATTR_FEATURE_FLAGS = "feature_flags"
 ATTR_FEATURES = "features"
 ATTR_FIELDS = "fields"
 ATTR_FILENAME = "filename"
@@ -312,6 +308,7 @@ ATTR_REGISTRIES = "registries"
 ATTR_REGISTRY = "registry"
 ATTR_REPOSITORIES = "repositories"
 ATTR_REPOSITORY = "repository"
+ATTR_ROUTE_METRIC = "route_metric"
 ATTR_SCHEMA = "schema"
 ATTR_SECURITY = "security"
 ATTR_SERIAL = "serial"
@@ -373,6 +370,7 @@ ATTR_VALUE = "value"
 ATTR_VERSION = "version"
 ATTR_VERSION_TIMESTAMP = "version_timestamp"
 ATTR_VERSION_LATEST = "version_latest"
+ATTR_VERSION_PENDING = "version_pending"
 ATTR_VIDEO = "video"
 ATTR_VLAN = "vlan"
 ATTR_VOLUME = "volume"

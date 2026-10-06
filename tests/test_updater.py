@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from awesomeversion import AwesomeVersion
@@ -19,10 +20,63 @@ from tests.dbus_service_mocks.network_manager import (
     NetworkManager as NetworkManagerService,
 )
 
-# GreenAutarky: the version URL is a GA constant (greenautarky/haos-version),
-# not the upstream version.home-assistant.io endpoint. Derive from the
-# constant so the test tracks the GA URL whichever branch it points at.
-URL_TEST = URL_HASSIO_VERSION.format(channel="stable")
+# The fork points URL_HASSIO_VERSION at its own feed (PATCH A). Pinned
+# literals, never derived from supervisor.const: a wrong constant would then
+# make these tests agree with it.
+URL_MAIN_TEMPLATE = (
+    "https://raw.githubusercontent.com/greenautarky/haos-version/main/{channel}.json"
+)
+URL_CANDIDATE_BASE = (
+    "https://raw.githubusercontent.com/greenautarky/haos-version/candidate/stable-1.4/"
+)
+URL_TEST = URL_MAIN_TEMPLATE.format(channel="stable")
+
+
+def test_default_version_url_is_main():
+    """The shipped default feed is the main branch of greenautarky/haos-version.
+
+    Regression trap: an earlier line of this fork pointed the default at a
+    release branch of the feed.
+    """
+    assert URL_HASSIO_VERSION == URL_MAIN_TEMPLATE
+
+
+@pytest.mark.usefixtures("no_job_throttle")
+async def test_fetch_uses_version_url_file(
+    coresys: CoreSys,
+    tmp_path: Path,
+    mock_update_data: MockResponse,
+    supervisor_internet: AsyncMock,
+) -> None:
+    """Updater startup reads /etc/ga-version-url, fetch_data requests that base."""
+    url_file = tmp_path / "ga-version-url"
+    url_file.write_text(URL_CANDIDATE_BASE + "\n")
+    coresys.security.force = True
+
+    with patch("supervisor.ga_version_url.FILE_GA_VERSION_URL", url_file):
+        await coresys.updater.load_config()
+    await coresys.updater.fetch_data()
+
+    assert coresys.websession.get.call_args[0][0] == (
+        URL_CANDIDATE_BASE + "stable.json"
+    )
+
+
+@pytest.mark.usefixtures("no_job_throttle")
+async def test_fetch_without_version_url_file_uses_main(
+    coresys: CoreSys,
+    tmp_path: Path,
+    mock_update_data: MockResponse,
+    supervisor_internet: AsyncMock,
+) -> None:
+    """No version URL file at startup: fetch_data requests the main feed."""
+    coresys.security.force = True
+
+    with patch("supervisor.ga_version_url.FILE_GA_VERSION_URL", tmp_path / "none"):
+        await coresys.updater.load_config()
+    await coresys.updater.fetch_data()
+
+    assert coresys.websession.get.call_args[0][0] == URL_TEST
 
 
 @pytest.mark.usefixtures("no_job_throttle")
