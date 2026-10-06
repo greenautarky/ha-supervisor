@@ -18,6 +18,7 @@ from ..const import (
     ATTR_BLK_WRITE,
     ATTR_BOOT,
     ATTR_CPU_PERCENT,
+    ATTR_DUPLICATE_LOG_FILE,
     ATTR_IMAGE,
     ATTR_IP_ADDRESS,
     ATTR_JOB_ID,
@@ -55,6 +56,7 @@ SCHEMA_OPTIONS = vol.Schema(
         vol.Optional(ATTR_AUDIO_OUTPUT): vol.Maybe(str),
         vol.Optional(ATTR_AUDIO_INPUT): vol.Maybe(str),
         vol.Optional(ATTR_BACKUPS_EXCLUDE_DATABASE): vol.Boolean(),
+        vol.Optional(ATTR_DUPLICATE_LOG_FILE): vol.Boolean(),
     }
 )
 
@@ -112,6 +114,7 @@ class APIHomeAssistant(CoreSysAttributes):
             ATTR_AUDIO_INPUT: self.sys_homeassistant.audio_input,
             ATTR_AUDIO_OUTPUT: self.sys_homeassistant.audio_output,
             ATTR_BACKUPS_EXCLUDE_DATABASE: self.sys_homeassistant.backups_exclude_database,
+            ATTR_DUPLICATE_LOG_FILE: self.sys_homeassistant.duplicate_log_file,
         }
 
     @api_process
@@ -145,6 +148,9 @@ class APIHomeAssistant(CoreSysAttributes):
 
         if ATTR_AUDIO_OUTPUT in body:
             self.sys_homeassistant.audio_output = body[ATTR_AUDIO_OUTPUT]
+
+        if ATTR_DUPLICATE_LOG_FILE in body:
+            self.sys_homeassistant.duplicate_log_file = body[ATTR_DUPLICATE_LOG_FILE]
 
         if ATTR_BACKUPS_EXCLUDE_DATABASE in body:
             self.sys_homeassistant.backups_exclude_database = body[

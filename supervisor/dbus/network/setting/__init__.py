@@ -56,6 +56,7 @@ CONF_ATTR_802_WIRELESS_SECURITY_PSK = "psk"
 CONF_ATTR_IPV4_METHOD = "method"
 CONF_ATTR_IPV4_ADDRESS_DATA = "address-data"
 CONF_ATTR_IPV4_GATEWAY = "gateway"
+CONF_ATTR_IPV4_ROUTE_METRIC = "route-metric"
 CONF_ATTR_IPV4_DNS = "dns"
 
 CONF_ATTR_IPV6_METHOD = "method"
@@ -63,6 +64,7 @@ CONF_ATTR_IPV6_ADDR_GEN_MODE = "addr-gen-mode"
 CONF_ATTR_IPV6_PRIVACY = "ip6-privacy"
 CONF_ATTR_IPV6_ADDRESS_DATA = "address-data"
 CONF_ATTR_IPV6_GATEWAY = "gateway"
+CONF_ATTR_IPV6_ROUTE_METRIC = "route-metric"
 CONF_ATTR_IPV6_DNS = "dns"
 
 IPV4_6_IGNORE_FIELDS = [
@@ -297,6 +299,7 @@ class NetworkSetting(DBusInterface):
                 method=data[CONF_ATTR_IPV4].get(CONF_ATTR_IPV4_METHOD),
                 address_data=address_data,
                 gateway=data[CONF_ATTR_IPV4].get(CONF_ATTR_IPV4_GATEWAY),
+                route_metric=data[CONF_ATTR_IPV4].get(CONF_ATTR_IPV4_ROUTE_METRIC),
                 dns=data[CONF_ATTR_IPV4].get(CONF_ATTR_IPV4_DNS),
             )
 
@@ -310,6 +313,7 @@ class NetworkSetting(DBusInterface):
                 ip6_privacy=data[CONF_ATTR_IPV6].get(CONF_ATTR_IPV6_PRIVACY),
                 address_data=address_data,
                 gateway=data[CONF_ATTR_IPV6].get(CONF_ATTR_IPV6_GATEWAY),
+                route_metric=data[CONF_ATTR_IPV6].get(CONF_ATTR_IPV6_ROUTE_METRIC),
                 dns=data[CONF_ATTR_IPV6].get(CONF_ATTR_IPV6_DNS),
             )
 

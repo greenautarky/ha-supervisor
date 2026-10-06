@@ -17,7 +17,9 @@ SCHEMA_DNS_CONFIG = vol.Schema(
         # DHCP-derived locals DNS doesn't answer RFC1918 PTRs (typical on captive
         # WiFi / hotspot setups). The DoT TLS handshake hangs ~75-95s per query and
         # spikes hassio_dns to 180% CPU. See ha-flasher-py TODO §"DNS Fallback CPU Spike".
-        vol.Optional(ATTR_SERVERS, default=lambda: list(GA_DEFAULT_DNS_SERVERS)): dns_server_list,
+        vol.Optional(
+            ATTR_SERVERS, default=lambda: list(GA_DEFAULT_DNS_SERVERS)
+        ): dns_server_list,
         vol.Optional(ATTR_FALLBACK, default=False): vol.Boolean(),
     },
     extra=vol.REMOVE_EXTRA,

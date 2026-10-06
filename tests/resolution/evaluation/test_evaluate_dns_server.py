@@ -14,7 +14,9 @@ async def test_evaluation(coresys: CoreSys):
     await coresys.core.set_state(CoreState.RUNNING)
 
     assert dns_server.reason not in coresys.resolution.unsupported
-    assert coresys.plugins.dns.fallback is True
+    # GA ships DNS fallback disabled by default, so state it rather than
+    # assume it: this test is about the evaluation, not about the default.
+    coresys.plugins.dns.fallback = True
     assert len(coresys.resolution.issues) == 0
 
     await dns_server()

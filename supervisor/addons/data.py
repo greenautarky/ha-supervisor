@@ -4,13 +4,13 @@ from copy import deepcopy
 from typing import Any
 
 from ..const import (
+    ATTR_AUDIO_OUTPUT,
     ATTR_IMAGE,
     ATTR_OPTIONS,
     ATTR_SYSTEM,
     ATTR_USER,
     ATTR_VERSION,
     FILE_HASSIO_ADDONS,
-    ATTR_AUDIO_OUTPUT,
 )
 from ..coresys import CoreSys, CoreSysAttributes
 from ..store.addon import AddonStore

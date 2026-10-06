@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp.test_utils import TestClient
 
 from supervisor.api.const import ATTR_AVAILABLE_UPDATES
+from supervisor.const import SUPERVISOR_VERSION
 from supervisor.coresys import CoreSys
 
 from tests.const import TEST_ADDON_SLUG
@@ -16,7 +17,7 @@ async def test_api_info(api_client):
     resp = await api_client.get("/info")
     result = await resp.json()
 
-    assert result["data"]["supervisor"] == "9999.09.9.dev9999"
+    assert result["data"]["supervisor"] == SUPERVISOR_VERSION
     assert result["data"]["docker"] == "1.0.0"
     assert result["data"]["supported"] is True
     assert result["data"]["channel"] == "stable"

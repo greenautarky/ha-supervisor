@@ -14,10 +14,8 @@ FILE_HASSIO_MULTICAST = Path(SUPERVISOR_DATA, "multicast.json")
 
 ATTR_FALLBACK = "fallback"
 
-# GA defaults for the hassio_dns plugin. Used by the schema (initial value when
-# no persisted dns.json exists) and by reset() (factory-reset state). Rationale:
-# upstream defaults (servers=[], fallback=True) let HA Core PTR sweeps escalate
-# to DoT and hang ~75-95s/query → hassio_dns 180% CPU. See V1.2-FORK-AUDIT.md.
+# GA defaults for hassio_dns plugin. Used by both the schema (initial value when
+# no persisted dns.json exists) and reset() (factory-reset state). Keep both in sync.
 GA_DEFAULT_DNS_SERVERS = ("dns://1.1.1.1", "dns://1.0.0.1")
 GA_DEFAULT_DNS_FALLBACK = False
 

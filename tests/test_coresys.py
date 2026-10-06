@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from aiohttp.hdrs import USER_AGENT
 import pytest
 
-from supervisor.const import CoreState
+from supervisor.const import SUPERVISOR_VERSION, CoreState
 from supervisor.coresys import CoreSys
 from supervisor.dbus.timedate import TimeDate
 from supervisor.utils.dt import utcnow
@@ -47,7 +47,7 @@ async def test_custom_user_agent(coresys: CoreSys):
     ) as mock_session:
         await coresys.init_websession()
         assert (
-            "HomeAssistantSupervisor/9999.09.9.dev9999"
+            f"HomeAssistantSupervisor/{SUPERVISOR_VERSION}"
             in mock_session.call_args_list[0][1]["headers"][USER_AGENT]
         )
 

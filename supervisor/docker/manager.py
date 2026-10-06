@@ -62,8 +62,8 @@ RE_IMPORT_IMAGE_STREAM = re.compile(r"(^Loaded image ID: |^Loaded image: )(.+)$"
 # Pull timeouts — protect against silent registry-stalls on flaky 4G/LTE links
 # that previously left HA-Core down indefinitely while supervisor self-update
 # blocked forever waiting for `docker pull` to make progress.
-PULL_STALL_TIMEOUT: Final = 90      # max seconds with no progress event
-PULL_TOTAL_TIMEOUT: Final = 1800    # absolute hard cap (30 min)
+PULL_STALL_TIMEOUT: Final = 90  # max seconds with no progress event
+PULL_TOTAL_TIMEOUT: Final = 1800  # absolute hard cap (30 min)
 
 
 @attr.s(frozen=True)
@@ -435,6 +435,7 @@ class DockerAPI(CoreSysAttributes):
         repository: str,
         tag: str = "latest",
         platform: str | None = None,
+        auth: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Pull the specified image and return it.
 
@@ -458,8 +459,12 @@ class DockerAPI(CoreSysAttributes):
 
         try:
             async with asyncio.timeout(PULL_STALL_TIMEOUT) as stall_cm:
+                # ``auth`` flows in from interface.py's install() — required for
+                # private-registry pulls now that the upstream pull path uses
+                # aiodocker (the legacy docker-py ``_docker_login`` had no
+                # effect here; cherry-picked from upstream #6355).
                 async for e in self.images.pull(
-                    repository, tag=tag, platform=platform, stream=True
+                    repository, tag=tag, platform=platform, auth=auth, stream=True
                 ):
                     # Each progress event refreshes the stall deadline.
                     stall_cm.reschedule(loop.time() + PULL_STALL_TIMEOUT)
