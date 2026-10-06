@@ -457,16 +457,29 @@ class Job(CoreSysAttributes):
                 if plugin.need_update
             ]
         ):
-            errors = await asyncio.gather(
-                *[plugin.update() for plugin in out_of_date], return_exceptions=True
-            )
-
-            if update_failures := [
-                out_of_date[i].slug for i in range(len(errors)) if errors[i] is not None
-            ]:
-                raise JobConditionException(
-                    f"'{method_name}' blocked from execution, was unable to update plugin(s) {', '.join(update_failures)} and all plugins must be up to date first"
+            # GA: with auto_update off, a Core or add-on update does not move
+            # plugins on the side; the operator updates them through the API.
+            if not coresys.sys_updater.auto_update:
+                _LOGGER.warning(
+                    "'%s' runs with outdated plugin(s) %s: auto update disabled, "
+                    "plugins are updated through the API",
+                    method_name,
+                    ", ".join(plugin.slug for plugin in out_of_date),
                 )
+            else:
+                errors = await asyncio.gather(
+                    *[plugin.update() for plugin in out_of_date],
+                    return_exceptions=True,
+                )
+
+                if update_failures := [
+                    out_of_date[i].slug
+                    for i in range(len(errors))
+                    if errors[i] is not None
+                ]:
+                    raise JobConditionException(
+                        f"'{method_name}' blocked from execution, was unable to update plugin(s) {', '.join(update_failures)} and all plugins must be up to date first"
+                    )
 
         if (
             JobCondition.MOUNT_AVAILABLE in used_conditions

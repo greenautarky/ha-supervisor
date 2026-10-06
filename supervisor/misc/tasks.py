@@ -50,7 +50,12 @@ RUN_WATCHDOG_OBSERVER_APPLICATION = 180
 
 RUN_CORE_BACKUP_CLEANUP = 86200
 
-PLUGIN_AUTO_UPDATE_CONDITIONS = PLUGIN_UPDATE_CONDITIONS + [JobCondition.RUNNING]
+# GA: plugins follow auto_update like add-ons, Core and Supervisor. With it off,
+# an operator moves plugins through the API (POST /<plugin>/update).
+PLUGIN_AUTO_UPDATE_CONDITIONS = PLUGIN_UPDATE_CONDITIONS + [
+    JobCondition.RUNNING,
+    JobCondition.AUTO_UPDATE,
+]
 
 OLD_BACKUP_THRESHOLD = timedelta(days=2)
 

@@ -86,6 +86,19 @@ class PluginManager(CoreSysAttributes):
         if self.sys_supervisor.need_update:
             return
 
+        # GA: with auto_update off, plugin versions move only through the API.
+        # A plugin whose image is missing was installed by plugin.load() above.
+        if not self.sys_updater.auto_update:
+            for plugin in self.all_plugins:
+                if plugin.need_update:
+                    _LOGGER.info(
+                        "Plugin %s stays at %s (latest %s): auto update disabled",
+                        plugin.slug,
+                        plugin.version,
+                        plugin.latest_version,
+                    )
+            return
+
         # Check requirements
         for plugin in self.all_plugins:
             # Check if need an update
