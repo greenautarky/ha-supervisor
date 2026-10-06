@@ -436,6 +436,11 @@ async def coresys(
         patch("supervisor.bootstrap.initialize_system"),
         patch("supervisor.utils.sentry.sentry_sdk.init"),
         patch("supervisor.core.Core._write_run_state"),
+        # Hermetic: never read the test host's /etc/ga-version-url
+        patch(
+            "supervisor.ga_version_url.FILE_GA_VERSION_URL",
+            Path("/nonexistent/ga-version-url"),
+        ),
     ):
         coresys_obj = await initialize_coresys()
 
