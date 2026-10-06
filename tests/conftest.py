@@ -409,6 +409,18 @@ async def fixture_all_dbus_services(
     )
 
 
+@pytest.fixture(autouse=True)
+def _mock_firewall():
+    """Mock out firewall rules by default to avoid dbus signal timeouts."""
+    patcher = patch(
+        "supervisor.host.firewall.FirewallManager.apply_gateway_firewall_rules",
+        new_callable=AsyncMock,
+    )
+    patcher.start()
+    yield patcher
+    patcher.stop()
+
+
 @pytest.fixture
 async def coresys(
     docker,
@@ -424,6 +436,11 @@ async def coresys(
         patch("supervisor.bootstrap.initialize_system"),
         patch("supervisor.utils.sentry.sentry_sdk.init"),
         patch("supervisor.core.Core._write_run_state"),
+        # Hermetic: never read the test host's /etc/ga-version-url
+        patch(
+            "supervisor.ga_version_url.FILE_GA_VERSION_URL",
+            Path("/nonexistent/ga-version-url"),
+        ),
     ):
         coresys_obj = await initialize_coresys()
 

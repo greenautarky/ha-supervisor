@@ -4,6 +4,7 @@ from contextlib import suppress
 from datetime import timedelta
 import json
 import logging
+from typing import Self
 
 import aiohttp
 from awesomeversion import AwesomeVersion
@@ -32,6 +33,7 @@ from .const import (
 )
 from .coresys import CoreSys, CoreSysAttributes
 from .exceptions import UpdaterError, UpdaterJobError
+from .ga_version_url import read_version_url_template
 from .jobs.decorator import Job, JobCondition
 from .utils.common import FileConfiguration
 from .validate import SCHEMA_UPDATER_CONFIG
@@ -47,6 +49,18 @@ class Updater(FileConfiguration, CoreSysAttributes):
         super().__init__(FILE_HASSIO_UPDATER, SCHEMA_UPDATER_CONFIG)
         self.coresys = coresys
         self._connectivity_listener: EventListener | None = None
+        self._version_url: str = URL_HASSIO_VERSION
+
+    async def load_config(self) -> Self:
+        """Read config and the version URL base provided by the host."""
+        await super().load_config()
+        self._version_url = await self.sys_run_in_executor(read_version_url_template)
+        return self
+
+    @property
+    def version_url(self) -> str:
+        """Return the version URL template ({channel} placeholder)."""
+        return self._version_url
 
     async def load(self) -> None:
         """Update internal data."""
@@ -257,7 +271,7 @@ class Updater(FileConfiguration, CoreSysAttributes):
 
         Is a coroutine.
         """
-        url = URL_HASSIO_VERSION.format(channel=self.channel)
+        url = self.version_url.format(channel=self.channel)
         machine = self.sys_machine or "default"
 
         # Get data
