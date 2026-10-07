@@ -56,7 +56,7 @@ class APIAuth(CoreSysAttributes):
         self,
         request: web.Request,
         addon: Addon,
-        data: dict[str, Any] | MultiDictProxy[str | bytes | FileField],
+        data: dict[str, Any] | MultiDictProxy[str | bytes | bytearray | FileField],
     ) -> Awaitable[bool]:
         """Process login with dict data.
 
