@@ -260,6 +260,20 @@ async def test_blacklist(
     )
     assert resp.status == 403
 
+    # Percent-encoded variants are matched on the fully decoded path. Only the
+    # first decode happens in aiohttp; a second one would happen downstream
+    # (backport of home-assistant/supervisor#7225)
+    for encoded in (
+        "hassio%5Fauth/password_reset",
+        "hassio%255Fauth/password_reset",
+        "hassio%252Faddon",
+    ):
+        resp = await api_token_validation.post(
+            f"{proxy_prefix}/{encoded}",
+            headers={"Authorization": "Bearer abc123"},
+        )
+        assert resp.status == 403, encoded
+
     # A normal (non-hassio) Core API call through the same proxy is allowed
     resp = await api_token_validation.get(
         f"{proxy_prefix}/states", headers={"Authorization": "Bearer abc123"}
