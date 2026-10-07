@@ -223,6 +223,43 @@ async def test_proxy_auth_abort_log(
         )
 
 
+@pytest.mark.parametrize(
+    "path", ["hassio_auth", "hassio_auth/password_reset", "hassio/addon"]
+)
+async def test_api_proxy_blocks_core_hassio_endpoints(
+    api_client: TestClient,
+    install_addon_example: Addon,
+    request: pytest.FixtureRequest,
+    path: str,
+):
+    """Test the proxy refuses to forward Core's Supervisor-only hassio endpoints.
+
+    These run as the Supervisor user on Core; an add-on must not reach them
+    through the proxy even if the security middleware blacklist is bypassed.
+    """
+    install_addon_example.persist[ATTR_ACCESS_TOKEN] = "abc123"
+    install_addon_example.data["homeassistant_api"] = True
+
+    request.param = "local_example"
+
+    with patch.object(HomeAssistantAPI, "make_request") as make_request:
+        # A forwarded request would succeed, so a missing guard shows as 200
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.content_type = "application/json"
+        mock_response.read.return_value = b"{}"
+        make_request.return_value.__aenter__.return_value = mock_response
+
+        response = await api_client.post(
+            f"/core/api/{path}",
+            headers={"Authorization": "Bearer abc123"},
+            json={"username": "owner", "password": "attacker"},
+        )
+
+        assert response.status == 403
+        make_request.assert_not_called()
+
+
 @pytest.mark.parametrize("path", ["", "mock_path"])
 async def test_api_proxy_get_request(
     api_client: TestClient,

@@ -42,10 +42,14 @@ CORE_FRONTEND: Final = re.compile(
 
 
 # Block Anytime
+# The boundary after "hassio" must match both the loopback proxy (hassio/...)
+# and the Core auth endpoints (hassio_auth, hassio_auth/password_reset).
+# Matching only "hassio/" would let an add-on reach /core/api/hassio_auth via
+# the proxy, which runs as the Supervisor user and can reset any user's password.
 BLACKLIST: Final = re.compile(
     r"^(?:"
-    r"|/homeassistant/api/hassio/.*"
-    r"|/core/api/hassio/.*"
+    r"|/homeassistant/api/hassio(?:/|_).*"
+    r"|/core/api/hassio(?:/|_).*"
     r")$"
 )
 
