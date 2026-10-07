@@ -64,6 +64,15 @@ RUN \
     && chmod a+x /usr/bin/tempio
 
 # Install requirements
+#
+# --index-strategy unsafe-best-match: the base image sets UV_EXTRA_INDEX_URL to
+# the Home Assistant musllinux wheel index, and uv's default strategy takes a
+# package only from the FIRST index that lists it. That index has no cp313
+# armv7 wheels after aiohttp 3.13.3 and orjson 3.11.4 (aiohttp 3.14.3 and
+# orjson 3.11.9 are listed there for cp314 aarch64/x86_64 only, measured
+# 2026-10-07), so those pins are unsatisfiable under --no-build although PyPI
+# ships the cp313 musllinux armv7l wheels. Best-match picks the requested version from whichever index has a
+# matching wheel. Every direct dependency is pinned to an exact version.
 COPY requirements.txt .
 RUN \
     if [ "${BUILD_ARCH}" = "i386" ]; then \
@@ -71,7 +80,8 @@ RUN \
     else \
         setarch=""; \
     fi \
-    && ${setarch} uv pip install --compile-bytecode --no-cache --no-build -r requirements.txt \
+    && ${setarch} uv pip install --compile-bytecode --no-cache --no-build \
+        --index-strategy unsafe-best-match -r requirements.txt \
     && rm -f requirements.txt
 
 # Install Home Assistant Supervisor
