@@ -94,6 +94,8 @@ from ..const import (
     ATTR_WATCHDOG,
     ATTR_WEBUI,
     REQUEST_FROM,
+    ROLE_ADMIN,
+    ROLE_MANAGER,
     AddonBoot,
     AddonBootConfig,
 )
@@ -213,6 +215,17 @@ class APIAddons(CoreSysAttributes):
         """Return add-on information."""
         addon: Addon = self.get_addon_for_request(request)
 
+        # User options may contain secrets. Expose them only to trusted callers:
+        # Home Assistant Core (and other non-add-on internals), the add-on itself,
+        # or an add-on with the manager/admin role. Any other add-on reading a
+        # different add-on's info gets the options redacted.
+        request_from = request.get(REQUEST_FROM)
+        expose_options = (
+            not isinstance(request_from, Addon)
+            or request_from is addon
+            or request_from.hassio_role in (ROLE_MANAGER, ROLE_ADMIN)
+        )
+
         data = {
             ATTR_NAME: addon.name,
             ATTR_SLUG: addon.slug,
@@ -228,7 +241,7 @@ class APIAddons(CoreSysAttributes):
             ATTR_RATING: rating_security(addon),
             ATTR_BOOT_CONFIG: addon.boot_config,
             ATTR_BOOT: addon.boot,
-            ATTR_OPTIONS: addon.options,
+            ATTR_OPTIONS: addon.options if expose_options else {},
             ATTR_SCHEMA: addon.schema_ui,
             ATTR_ARCH: addon.supported_arch,
             ATTR_MACHINE: addon.supported_machine,

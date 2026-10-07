@@ -51,6 +51,55 @@ async def test_addons_info(
     assert result["data"]["watchdog"] is False
 
 
+@pytest.mark.parametrize("api_client", ["local_example"], indirect=True)
+async def test_addons_info_options_redacted_for_other_addon(
+    api_client: TestClient,
+    install_addon_ssh: Addon,
+    install_addon_example: Addon,
+):
+    """Test a default-role add-on cannot read another add-on's options via info."""
+    install_addon_example.data["hassio_role"] = "default"
+
+    # Request originates from local_example, reading local_ssh's info
+    resp = await api_client.get(f"/addons/{TEST_ADDON_SLUG}/info")
+    result = await resp.json()
+    # Non-secret metadata is still exposed...
+    assert result["data"]["slug"] == TEST_ADDON_SLUG
+    # ...but user options (which may hold secrets) are redacted
+    assert install_addon_ssh.options != {}
+    assert result["data"]["options"] == {}
+
+
+@pytest.mark.parametrize("api_client", ["local_example"], indirect=True)
+async def test_addons_info_options_exposed_to_manager(
+    api_client: TestClient,
+    install_addon_ssh: Addon,
+    install_addon_example: Addon,
+):
+    """Test a manager-role add-on can read another add-on's options via info."""
+    install_addon_example.data["hassio_role"] = "manager"
+
+    # Request originates from local_example (manager), reading local_ssh's info
+    resp = await api_client.get(f"/addons/{TEST_ADDON_SLUG}/info")
+    result = await resp.json()
+    assert install_addon_ssh.options != {}
+    assert result["data"]["options"] == install_addon_ssh.options
+
+
+@pytest.mark.parametrize("api_client", [TEST_ADDON_SLUG], indirect=True)
+async def test_addons_info_options_visible_for_self(
+    api_client: TestClient,
+    install_addon_ssh: Addon,
+):
+    """Test a default-role add-on can always read its own options via info."""
+    install_addon_ssh.data["hassio_role"] = "default"
+
+    resp = await api_client.get("/addons/self/info")
+    result = await resp.json()
+    assert install_addon_ssh.options != {}
+    assert result["data"]["options"] == install_addon_ssh.options
+
+
 # DEPRECATED - Remove with legacy routing logic on 1/2023
 async def test_addons_info_not_installed(
     api_client: TestClient, coresys: CoreSys, test_repository: Repository
