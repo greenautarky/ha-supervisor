@@ -228,3 +228,54 @@ async def test_home_assistant_paths(api_token_validation: TestClient, coresys: C
         "/addons/local_test/sys_options", headers={"Authorization": "Bearer abc123"}
     )
     assert resp.status == 200
+
+
+@pytest.mark.usefixtures("plugin_tokens")
+@pytest.mark.parametrize("proxy_prefix", ["/core/api", "/homeassistant/api"])
+async def test_blacklist(
+    api_token_validation: TestClient,
+    install_addon_example: Addon,
+    proxy_prefix: str,
+):
+    """Test the Core API hassio endpoints are blocked for every add-on role."""
+    install_addon_example.persist["access_token"] = "abc123"
+    install_addon_example.data["hassio_api"] = True
+    install_addon_example.data["hassio_role"] = "admin"
+
+    # The hassio loopback is blacklisted regardless of role
+    resp = await api_token_validation.get(
+        f"{proxy_prefix}/hassio/app", headers={"Authorization": "Bearer abc123"}
+    )
+    assert resp.status == 403
+
+    # The Core auth endpoints run as the Supervisor user; an add-on must not
+    # reach them through the proxy (backport of home-assistant/supervisor#7122)
+    resp = await api_token_validation.get(
+        f"{proxy_prefix}/hassio_auth", headers={"Authorization": "Bearer abc123"}
+    )
+    assert resp.status == 403
+    resp = await api_token_validation.post(
+        f"{proxy_prefix}/hassio_auth/password_reset",
+        headers={"Authorization": "Bearer abc123"},
+    )
+    assert resp.status == 403
+
+    # Percent-encoded variants are matched on the fully decoded path. Only the
+    # first decode happens in aiohttp; a second one would happen downstream
+    # (backport of home-assistant/supervisor#7225)
+    for encoded in (
+        "hassio%5Fauth/password_reset",
+        "hassio%255Fauth/password_reset",
+        "hassio%252Faddon",
+    ):
+        resp = await api_token_validation.post(
+            f"{proxy_prefix}/{encoded}",
+            headers={"Authorization": "Bearer abc123"},
+        )
+        assert resp.status == 403, encoded
+
+    # A normal (non-hassio) Core API call through the same proxy is allowed
+    resp = await api_token_validation.get(
+        f"{proxy_prefix}/states", headers={"Authorization": "Bearer abc123"}
+    )
+    assert resp.status == 200

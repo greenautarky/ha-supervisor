@@ -99,7 +99,7 @@ async def test_api_send_del_discovery(
     uuid = result["data"]["uuid"]
     coresys.websession.post.assert_called_once()
     assert (
-        coresys.websession.post.call_args.args[0]
+        str(coresys.websession.post.call_args.args[0])
         == f"http://172.30.32.1:8123/api/hassio_push/discovery/{uuid}"
     )
     assert coresys.websession.post.call_args.kwargs["json"] == {
@@ -118,7 +118,7 @@ async def test_api_send_del_discovery(
     assert resp.status == 200
     coresys.websession.delete.assert_called_once()
     assert (
-        coresys.websession.delete.call_args.args[0]
+        str(coresys.websession.delete.call_args.args[0])
         == f"http://172.30.32.1:8123/api/hassio_push/discovery/{uuid}"
     )
     assert coresys.websession.delete.call_args.kwargs["json"] == {

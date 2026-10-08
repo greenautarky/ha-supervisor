@@ -42,10 +42,14 @@ CORE_FRONTEND: Final = re.compile(
 
 
 # Block Anytime
+# The boundary after "hassio" must match both the loopback proxy (hassio/...)
+# and the Core auth endpoints (hassio_auth, hassio_auth/password_reset).
+# Matching only "hassio/" would let an add-on reach /core/api/hassio_auth via
+# the proxy, which runs as the Supervisor user and can reset any user's password.
 BLACKLIST: Final = re.compile(
     r"^(?:"
-    r"|/homeassistant/api/hassio/.*"
-    r"|/core/api/hassio/.*"
+    r"|/homeassistant/api/hassio(?:/|_).*"
+    r"|/core/api/hassio(?:/|_).*"
     r")$"
 )
 
@@ -166,6 +170,17 @@ FILTERS: Final = re.compile(
 # fmt: on
 
 
+def recursive_unquote(value: str) -> str:
+    """Percent-decode a value until it no longer changes.
+
+    Use this to canonicalize a path before matching it against a deny pattern,
+    so that multiply-encoded variants (e.g. %255F for "_") can't slip past.
+    """
+    while (unquoted := unquote(value)) != value:
+        value = unquoted
+    return value
+
+
 class SecurityMiddleware(CoreSysAttributes):
     """Security middleware functions."""
 
@@ -173,22 +188,16 @@ class SecurityMiddleware(CoreSysAttributes):
         """Initialize security middleware."""
         self.coresys: CoreSys = coresys
 
-    def _recursive_unquote(self, value: str) -> str:
-        """Handle values that are encoded multiple times."""
-        if (unquoted := unquote(value)) != value:
-            unquoted = self._recursive_unquote(unquoted)
-        return unquoted
-
     @middleware
     async def block_bad_requests(self, request: Request, handler: Callable) -> Response:
         """Process request and tblock commonly known exploit attempts."""
-        if FILTERS.search(self._recursive_unquote(request.path)):
+        if FILTERS.search(recursive_unquote(request.path)):
             _LOGGER.warning(
                 "Filtered a potential harmful request to: %s", request.raw_path
             )
             raise HTTPBadRequest
 
-        if FILTERS.search(self._recursive_unquote(request.query_string)):
+        if FILTERS.search(recursive_unquote(request.query_string)):
             _LOGGER.warning(
                 "Filtered a request with a potential harmful query string: %s",
                 request.raw_path,
@@ -214,7 +223,10 @@ class SecurityMiddleware(CoreSysAttributes):
         supervisor_token = extract_supervisor_token(request)
 
         # Blacklist
-        if BLACKLIST.match(request.path):
+        # Match the fully decoded path: request.path is only decoded once, so a
+        # double-encoded variant would otherwise pass here and be re-decoded
+        # downstream.
+        if BLACKLIST.match(recursive_unquote(request.path)):
             _LOGGER.error("%s is blacklisted!", request.path)
             raise HTTPForbidden()
 

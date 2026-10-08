@@ -248,7 +248,7 @@ async def test_addon_uninstall_removes_discovery(
     await asyncio.sleep(0)
     coresys.websession.delete.assert_called_once()
     assert (
-        coresys.websession.delete.call_args.args[0]
+        str(coresys.websession.delete.call_args.args[0])
         == f"http://172.30.32.1:8123/api/hassio_push/discovery/{message.uuid}"
     )
     assert coresys.websession.delete.call_args.kwargs["json"] == {

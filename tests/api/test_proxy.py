@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Generator
 from json import dumps
 import logging
+import re
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -169,6 +170,123 @@ async def test_proxy_binary_message(
     assert await client.close()
 
 
+async def test_proxy_blocks_supervisor_api_command(
+    proxy_ws_client: WebSocketGenerator,
+    ha_ws_server: MockHAServerWebSocket,
+    install_addon_ssh: Addon,
+    caplog: pytest.LogCaptureFixture,
+):
+    """Test the proxy blocks a supervisor/api command instead of tunneling it to Core.
+
+    An add-on with only `homeassistant_api: true` must not reach the Supervisor
+    API through this proxy: Core executes a `supervisor/api` command by calling
+    back into the Supervisor with its own, fully privileged token.
+    """
+    install_addon_ssh.persist[ATTR_ACCESS_TOKEN] = "abc123"
+    client: MockHAClientWebSocket = await proxy_ws_client(
+        install_addon_ssh.supervisor_token
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        await client.send_json_auto_id(
+            {
+                "type": "supervisor/api",
+                "endpoint": "/addons/self/options",
+                "method": "post",
+                "data": {"boot": "auto"},
+            }
+        )
+        result = await client.receive_json(timeout=2)
+        assert (
+            "Blocked disallowed WebSocket command type 'supervisor/api'" in caplog.text
+        )
+
+    assert result == {
+        "id": 1,
+        "type": "result",
+        "success": False,
+        "error": {"code": "unauthorized", "message": "Unauthorized"},
+    }
+    # The command must never have reached Home Assistant Core
+    assert ha_ws_server.incoming.empty()
+
+    assert await client.close()
+
+
+@pytest.mark.parametrize(
+    "command_type",
+    [
+        "supervisor/api",
+        "supervisor/event",
+        "supervisor/subscribe",
+        "hassio/update/core",
+    ],
+)
+async def test_proxy_blocks_denied_command_types(
+    proxy_ws_client: WebSocketGenerator,
+    ha_ws_server: MockHAServerWebSocket,
+    install_addon_ssh: Addon,
+    command_type: str,
+):
+    """Test every Supervisor/Core-only command namespace is blocked, not just supervisor/api."""
+    install_addon_ssh.persist[ATTR_ACCESS_TOKEN] = "abc123"
+    client: MockHAClientWebSocket = await proxy_ws_client(
+        install_addon_ssh.supervisor_token
+    )
+
+    await client.send_json_auto_id({"type": command_type})
+    result = await client.receive_json(timeout=2)
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "unauthorized"
+    assert ha_ws_server.incoming.empty()
+
+    assert await client.close()
+
+
+async def test_proxy_allows_normal_commands_after_blocked_command(
+    proxy_ws_client: WebSocketGenerator,
+    ha_ws_server: MockHAServerWebSocket,
+    install_addon_ssh: Addon,
+):
+    """Test the connection stays usable after a denied command is rejected."""
+    install_addon_ssh.persist[ATTR_ACCESS_TOKEN] = "abc123"
+    client: MockHAClientWebSocket = await proxy_ws_client(
+        install_addon_ssh.supervisor_token
+    )
+
+    await client.send_json_auto_id({"type": "supervisor/api", "endpoint": "/backups"})
+    denied = await client.receive_json(timeout=2)
+    assert denied["success"] is False
+
+    await client.send_json_auto_id({"type": "call_service", "domain": "light"})
+    proxied_msg = await ha_ws_server.incoming.get()
+    assert proxied_msg.type == WSMsgType.TEXT
+    assert '"type": "call_service"' in proxied_msg.data
+
+    assert await client.close()
+
+
+async def test_proxy_forwards_malformed_text_message(
+    proxy_ws_client: WebSocketGenerator,
+    ha_ws_server: MockHAServerWebSocket,
+    install_addon_ssh: Addon,
+):
+    """Test non-JSON text frames are forwarded as-is (Core rejects them itself)."""
+    install_addon_ssh.persist[ATTR_ACCESS_TOKEN] = "abc123"
+    client: MockHAClientWebSocket = await proxy_ws_client(
+        install_addon_ssh.supervisor_token
+    )
+
+    await client.send_str("this is not JSON")
+    proxied_msg = await ha_ws_server.incoming.get()
+    assert proxied_msg.type == WSMsgType.TEXT
+    assert proxied_msg.data == "this is not JSON"
+
+    assert await client.close()
+
+
 async def test_proxy_large_message(
     proxy_ws_client: WebSocketGenerator,
     ha_ws_server: MockHAServerWebSocket,
@@ -180,11 +298,18 @@ async def test_proxy_large_message(
         install_addon_ssh.supervisor_token
     )
 
-    # Test message over size limit of 4MB
-    await client.send_bytes(bytearray(1024 * 1024 * 4))
-    msg = await client.receive()
-    assert msg.type == WSMsgType.CLOSE
-    assert msg.data == WSCloseCode.MESSAGE_TOO_BIG
+    # Test message over size limit of 4MB. Since aiohttp 3.14.1 the server
+    # rejects the oversized frame from its header and resets the connection
+    # before the full payload is sent, so the send itself may raise in
+    # addition to the CLOSE frame. See aio-libs/aiohttp#12817.
+    try:
+        await client.send_bytes(bytearray(1024 * 1024 * 4))
+    except ConnectionError:
+        pass
+    else:
+        msg = await client.receive()
+        assert msg.type == WSMsgType.CLOSE
+        assert msg.data == WSCloseCode.MESSAGE_TOO_BIG
 
     assert ha_ws_server.closed
 
@@ -221,6 +346,122 @@ async def test_proxy_auth_abort_log(
         assert (
             "Unexpected message during authentication for WebSocket API" in caplog.text
         )
+
+
+@pytest.mark.parametrize(
+    "path", ["hassio_auth", "hassio_auth/password_reset", "hassio/addon"]
+)
+async def test_api_proxy_blocks_core_hassio_endpoints(
+    api_client: TestClient,
+    install_addon_example: Addon,
+    request: pytest.FixtureRequest,
+    path: str,
+):
+    """Test the proxy refuses to forward Core's Supervisor-only hassio endpoints.
+
+    These run as the Supervisor user on Core; an add-on must not reach them
+    through the proxy even if the security middleware blacklist is bypassed.
+    """
+    install_addon_example.persist[ATTR_ACCESS_TOKEN] = "abc123"
+    install_addon_example.data["homeassistant_api"] = True
+
+    request.param = "local_example"
+
+    with patch.object(HomeAssistantAPI, "make_request") as make_request:
+        # A forwarded request would succeed, so a missing guard shows as 200
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.content_type = "application/json"
+        mock_response.read.return_value = b"{}"
+        make_request.return_value.__aenter__.return_value = mock_response
+
+        response = await api_client.post(
+            f"/core/api/{path}",
+            headers={"Authorization": "Bearer abc123"},
+            json={"username": "owner", "password": "attacker"},
+        )
+
+        assert response.status == 403
+        make_request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "hassio%5Fauth/password_reset",  # single-encoded "_"
+        "hassio%255Fauth/password_reset",  # double-encoded "_"
+        "hassio%252Faddon",  # double-encoded "/"
+        "hassio%25255Fauth",  # triple-encoded "_"
+    ],
+)
+async def test_api_proxy_blocks_encoded_core_hassio_endpoints(
+    api_client: TestClient,
+    install_addon_example: Addon,
+    request: pytest.FixtureRequest,
+    path: str,
+):
+    """Test the proxy deny check sees through percent-encoding.
+
+    The route capture is decoded once and the upstream client would decode
+    again, so the deny pattern must match the fully decoded path. The security
+    middleware blacklist is disabled here so the proxy's own guard is exercised.
+    """
+    install_addon_example.persist[ATTR_ACCESS_TOKEN] = "abc123"
+    install_addon_example.data["homeassistant_api"] = True
+
+    request.param = "local_example"
+
+    with (
+        patch("supervisor.api.middleware.security.BLACKLIST", re.compile(r"(?!)")),
+        patch.object(HomeAssistantAPI, "make_request") as make_request,
+    ):
+        # A forwarded request would succeed, so a missing guard shows as 200
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.content_type = "application/json"
+        mock_response.read.return_value = b"{}"
+        make_request.return_value.__aenter__.return_value = mock_response
+
+        response = await api_client.post(
+            f"/core/api/{path}",
+            headers={"Authorization": "Bearer abc123"},
+            json={"username": "owner", "password": "attacker"},
+        )
+
+        assert response.status == 403
+        make_request.assert_not_called()
+
+
+async def test_api_proxy_forwards_raw_path(
+    api_client: TestClient,
+    install_addon_example: Addon,
+    request: pytest.FixtureRequest,
+):
+    """Test the proxy forwards the path exactly as the add-on sent it.
+
+    Percent-encoded sequences must reach Core untouched: %2F must not become a
+    path separator and %255F must not collapse into "_" on the way.
+    """
+    install_addon_example.persist[ATTR_ACCESS_TOKEN] = "abc123"
+    install_addon_example.data["homeassistant_api"] = True
+
+    request.param = "local_example"
+
+    with patch.object(HomeAssistantAPI, "make_request") as make_request:
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.content_type = "application/json"
+        mock_response.read.return_value = b"{}"
+        make_request.return_value.__aenter__.return_value = mock_response
+
+        response = await api_client.get(
+            "/core/api/states/light.a%2Fb%255Fc%20d?x=1",
+            headers={"Authorization": "Bearer abc123"},
+        )
+
+        assert response.status == 200
+        assert make_request.call_args[0][1] == "api/states/light.a%2Fb%255Fc%20d"
+        assert make_request.call_args[1]["params"]["x"] == "1"
 
 
 @pytest.mark.parametrize("path", ["", "mock_path"])
