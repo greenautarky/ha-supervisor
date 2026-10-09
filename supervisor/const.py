@@ -31,7 +31,11 @@ SUPERVISOR_DOCKER_NAME: str = f"{DOCKER_PREFIX}_supervisor"
 URL_HASSIO_APPS = "https://github.com/home-assistant/apps"
 URL_HASSIO_APPS_LEGACY = "https://github.com/home-assistant/addons"
 URL_HASSIO_APPARMOR = "https://version.home-assistant.io/apparmor_{channel}.txt"
-URL_HASSIO_VERSION = "https://version.home-assistant.io/{channel}.json"
+# GA fork: the version feed is GA's own (greenautarky/haos-version). This is
+# the default when /etc/ga-version-url is unusable; see ga_version_url.py.
+URL_HASSIO_VERSION = (
+    "https://raw.githubusercontent.com/greenautarky/haos-version/main/{channel}.json"
+)
 
 SUPERVISOR_DATA = Path("/data")
 

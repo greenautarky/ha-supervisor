@@ -2,12 +2,17 @@
 
 from copy import deepcopy
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from awesomeversion import AwesomeVersion
 import pytest
 
-from supervisor.const import ATTR_HASSOS_UNRESTRICTED, CoreState
+from supervisor.const import (
+    ATTR_HASSOS_UNRESTRICTED,
+    URL_HASSIO_VERSION,
+    CoreState,
+)
 from supervisor.coresys import CoreSys
 from supervisor.dbus.const import ConnectivityState
 from supervisor.exceptions import UpdaterError, UpdaterJobError
@@ -19,7 +24,65 @@ from tests.dbus_service_mocks.network_manager import (
     NetworkManager as NetworkManagerService,
 )
 
-URL_TEST = "https://version.home-assistant.io/stable.json"
+# GA fork: URL_HASSIO_VERSION points at GA's own feed. Pinned literals, never
+# derived from supervisor.const: a wrong constant would then make these tests
+# agree with it.
+URL_MAIN_TEMPLATE = (
+    "https://raw.githubusercontent.com/greenautarky/haos-version/main/{channel}.json"
+)
+URL_CANDIDATE_BASE = (
+    "https://raw.githubusercontent.com/greenautarky/haos-version/candidate/stable-1.4/"
+)
+URL_TEST = URL_MAIN_TEMPLATE.format(channel="stable")
+
+
+def test_default_version_url_is_main():
+    """The shipped default feed is the main branch of greenautarky/haos-version."""
+    assert URL_HASSIO_VERSION == URL_MAIN_TEMPLATE
+
+
+@pytest.mark.usefixtures("no_job_throttle")
+async def test_fetch_uses_version_url_file(
+    coresys: CoreSys,
+    tmp_path: Path,
+    mock_update_data: MockResponse,
+    supervisor_internet: AsyncMock,
+) -> None:
+    """Updater startup reads /etc/ga-version-url, fetch_data requests that base."""
+    url_file = tmp_path / "ga-version-url"
+    url_file.write_text(URL_CANDIDATE_BASE + "\n")
+    coresys.security.force = True
+
+    with patch("supervisor.ga_version_url.FILE_GA_VERSION_URL", url_file):
+        await coresys.updater.load_config()
+    await coresys.updater.fetch_data()
+
+    assert coresys.websession.get.call_args[0][0] == (
+        URL_CANDIDATE_BASE + "stable.json"
+    )
+
+
+@pytest.mark.usefixtures("no_job_throttle")
+async def test_fetch_refuses_a_non_ga_feed(
+    coresys: CoreSys,
+    mock_update_data: MockResponse,
+    supervisor_internet: AsyncMock,
+) -> None:
+    """The request-side invariant: a non-GA template is refused, nothing is fetched.
+
+    Injected on purpose (the template cannot get there through the file reader,
+    which validates it): this proves the last guard fires on its own.
+    """
+    coresys.updater._version_url = (  # pylint: disable=protected-access
+        "https://version.home-assistant.io/{channel}.json"
+    )
+
+    # fetch_data is a detached job: the error surfaces on its task
+    task = await coresys.updater.fetch_data()
+    assert task is not None
+    with pytest.raises(UpdaterError, match="not a GA version feed"):
+        await task
+    coresys.websession.get.assert_not_called()
 
 
 @pytest.mark.usefixtures("no_job_throttle")
@@ -151,10 +214,7 @@ async def test_delayed_fetch_for_connectivity(
     await coresys.block_till_done()
 
     coresys.websession.get.assert_called_once()
-    assert (
-        coresys.websession.get.call_args[0][0]
-        == "https://version.home-assistant.io/stable.json"
-    )
+    assert coresys.websession.get.call_args[0][0] == URL_TEST
 
 
 @pytest.mark.usefixtures("no_job_throttle")
