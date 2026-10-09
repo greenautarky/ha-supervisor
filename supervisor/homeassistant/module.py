@@ -208,7 +208,33 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
 
     @property
     def default_image(self) -> str:
-        """Return the default image for this system."""
+        """Return the default image for this system.
+
+        GA fork: the channel decides. Upstream stopped building Core for armv7
+        in late 2025, so on the iHost a current Core only exists as the GA
+        armv7 build. The channel's version.json names the Core image
+        (`images.core`, cached by the updater) and install/update pull from it,
+        while load() reconciled every restart back to a hardcoded upstream
+        name that has no 2026 tag for armv7. Two sources for one truth; the
+        channel is the only one now. The upstream name is the fallback for a
+        device that has never read a channel.
+
+        This also keeps upstream's HOME_ASSISTANT_CORE_CUSTOM_IMAGE evaluation
+        (#7092) from flagging the GA armv7 Core as a custom image: it compares
+        against this property.
+        """
+        if image := self.sys_updater.image_homeassistant:
+            return image
+        return self.upstream_image
+
+    @property
+    def upstream_image(self) -> str:
+        """Return the upstream-namespaced Core image for this machine.
+
+        The default before the channel decided (see default_image). A device
+        that installed Core before its channel moved to another image still
+        runs this one, and load() must not tear it down on a restart.
+        """
         return f"ghcr.io/home-assistant/{self.sys_machine}-homeassistant"
 
     @property
