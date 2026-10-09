@@ -422,15 +422,35 @@ class Supervisor(CoreSysAttributes):
             await self.check_and_update_connectivity(force=True)
 
     async def _do_connectivity_check(self) -> None:
-        """Run a single HTTP probe and update cached connectivity state."""
+        """Run a single HTTP probe and update cached connectivity state.
+
+        GA fork: the upstream probe only tries checkonline.home-assistant.io.
+        Some networks answer 403 for or block that one URL while the internet
+        works, and a false "no internet" blocks app repository pulls and the
+        version fetch. When the primary probe fails, github.com (needed for
+        repository pulls anyway) is tried before connectivity is declared lost.
+        """
         timeout = aiohttp.ClientTimeout(total=10)
         try:
             await self.sys_websession.head(
                 "https://checkonline.home-assistant.io/online.txt", timeout=timeout
             )
-        except (ClientError, TimeoutError) as err:
-            _LOGGER.debug("Supervisor Connectivity check failed: %s", err)
-            self._update_connectivity(False)
-        else:
-            _LOGGER.debug("Supervisor Connectivity check succeeded")
-            self._update_connectivity(True)
+        except (ClientError, TimeoutError) as primary_err:
+            _LOGGER.debug(
+                "Primary connectivity check failed (%s), trying fallback",
+                primary_err,
+            )
+            try:
+                await self.sys_websession.head("https://github.com", timeout=timeout)
+            except (ClientError, TimeoutError) as err:
+                _LOGGER.debug("Supervisor Connectivity check failed: %s", err)
+                self._update_connectivity(False)
+                return
+            _LOGGER.info(
+                "Connectivity check: checkonline.home-assistant.io failed (%s),"
+                " github.com answered - treating the Supervisor as online",
+                primary_err,
+            )
+
+        _LOGGER.debug("Supervisor Connectivity check succeeded")
+        self._update_connectivity(True)
