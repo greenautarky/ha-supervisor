@@ -528,8 +528,14 @@ async def test_plugins_updated(coresys: CoreSys):
         assert await test.execute()
 
 
-async def test_plugins_updated_skips_update_when_auto_update_disabled(coresys: CoreSys):
-    """Test plugins updated condition blocks when auto update is disabled."""
+async def test_plugins_updated_skips_update_when_auto_update_disabled(
+    coresys: CoreSys, caplog: pytest.LogCaptureFixture
+):
+    """Test plugins updated condition with auto update disabled.
+
+    GA fork: the job runs with the outdated plugin and logs a WARNING naming
+    it (upstream #6606 blocks the job). The plugin is not updated either way.
+    """
 
     class TestClass:
         """Test class."""
@@ -553,8 +559,10 @@ async def test_plugins_updated_skips_update_when_auto_update_disabled(coresys: C
         patch.object(PluginAudio, "need_update", new=PropertyMock(return_value=True)),
         patch.object(PluginAudio, "update") as update,
     ):
-        assert not await test.execute()
+        assert await test.execute()
         update.assert_not_called()
+
+    assert "runs with outdated plugin(s) audio" in caplog.text
 
 
 async def test_auto_update(coresys: CoreSys):

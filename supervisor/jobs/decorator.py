@@ -550,22 +550,30 @@ class Job(CoreSysAttributes):
             ]
         ):
             if not coresys.sys_updater.auto_update:
-                raise JobConditionException(
-                    f"'{method_name}' blocked from execution, plugin(s) {', '.join(plugin.slug for plugin in out_of_date)} are not up to date and auto-update is disabled"
+                # GA fork: with auto_update off the operator (fleet-manager)
+                # moves plugins through the API. A Core or app install/update
+                # runs with outdated plugins and says so, instead of being
+                # refused (upstream #6606 refuses).
+                _LOGGER.warning(
+                    "'%s' runs with outdated plugin(s) %s: auto update disabled,"
+                    " plugins are updated through the API",
+                    method_name,
+                    ", ".join(plugin.slug for plugin in out_of_date),
+                )
+            else:
+                errors = await asyncio.gather(
+                    *[plugin.update() for plugin in out_of_date],
+                    return_exceptions=True,
                 )
 
-            errors = await asyncio.gather(
-                *[plugin.update() for plugin in out_of_date], return_exceptions=True
-            )
-
-            if update_failures := [
-                plugin.slug
-                for plugin, error in zip(out_of_date, errors)
-                if error is not None
-            ]:
-                raise JobConditionException(
-                    f"'{method_name}' blocked from execution, was unable to update plugin(s) {', '.join(update_failures)} and all plugins must be up to date first"
-                )
+                if update_failures := [
+                    plugin.slug
+                    for plugin, error in zip(out_of_date, errors)
+                    if error is not None
+                ]:
+                    raise JobConditionException(
+                        f"'{method_name}' blocked from execution, was unable to update plugin(s) {', '.join(update_failures)} and all plugins must be up to date first"
+                    )
 
     def _clear_detached_task(self, task: asyncio.Task[Any]) -> None:
         """Drop the reference to a finished detached task and consume its error.
