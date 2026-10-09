@@ -9,6 +9,7 @@ from supervisor.coresys import CoreSys
 from supervisor.dbus.resolved import Resolved
 from supervisor.docker.manager import DockerAPI
 from supervisor.host.const import LogFormatter
+from supervisor.plugins.const import GA_DEFAULT_DNS_FALLBACK, GA_DEFAULT_DNS_SERVERS
 
 from tests.common import load_json_fixture
 from tests.dbus_service_mocks.base import DBusServiceMock
@@ -85,8 +86,9 @@ async def test_options(
 ):
     """Test options api."""
     api_client, prefix = api_client_with_prefix
-    assert coresys.plugins.dns.servers == []
-    assert coresys.plugins.dns.fallback is True
+    # GA ships defaults where upstream ships an empty list.
+    assert coresys.plugins.dns.servers == list(GA_DEFAULT_DNS_SERVERS)
+    assert coresys.plugins.dns.fallback is GA_DEFAULT_DNS_FALLBACK
 
     with patch.object(type(coresys.plugins.dns), "restart") as restart:
         await api_client.post(
