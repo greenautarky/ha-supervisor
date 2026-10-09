@@ -12,6 +12,7 @@ These tests are where the waiting is actually exercised, so that the patch
 elsewhere hides nothing.
 """
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -114,3 +115,25 @@ def test_the_budget_is_a_real_number_of_seconds():
     other test in the suite stayed green, because they all patch it to zero.
     """
     assert PluginDns._GA_OTA_ACTIVE_WAIT_S >= 1
+
+
+def test_hardcoded_services_ip_is_current_and_loud(caplog):
+    """The last-resort address matches the OS default and is never silent.
+
+    Pinned literal: GA_SERVICES_IP of ha-operating-system
+    buildroot-external/rootfs-overlay/etc/ga-services.conf (origin/master,
+    2026-10-09). The 2025.11.5.x line still carried the address the backend
+    had left, with no log line when it was used.
+    """
+    assert PluginDns._GA_HARDCODED_FALLBACK_IP == "100.126.129.116"
+
+    with (
+        patch.object(PluginDns, "_read_ga_conf_value", return_value=None),
+        caplog.at_level(logging.INFO),
+    ):
+        result = PluginDns._load_ga_services_ip()
+
+    assert result == "100.126.129.116"
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "falling back to the hardcoded" in errors[0].getMessage()

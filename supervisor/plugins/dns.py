@@ -433,7 +433,7 @@ class PluginDns(PluginBase):
     # Last-resort hardcoded IP — must match the latest GA_SERVICES_IP value in
     # buildroot-external/rootfs-overlay/etc/ga-services.conf (ha-operating-system).
     # Only kicks in if every config-file lookup fails (rare).
-    _GA_HARDCODED_FALLBACK_IP = "100.126.142.217"
+    _GA_HARDCODED_FALLBACK_IP = "100.126.129.116"
 
     _GA_CONF_PATHS = (
         Path("/mnt/data/ga-services.conf"),  # runtime override (persistent)
@@ -454,10 +454,21 @@ class PluginDns(PluginBase):
 
     @classmethod
     def _load_ga_services_ip(cls) -> str:
-        """Load GA_SERVICES_IP for influx/loki (NetBird-only direct backends)."""
-        return (
-            cls._read_ga_conf_value("GA_SERVICES_IP") or cls._GA_HARDCODED_FALLBACK_IP
+        """Load GA_SERVICES_IP for influx/loki (NetBird-only direct backends).
+
+        The hardcoded constant is a last resort and is reported at ERROR: it
+        goes stale whenever the backend moves, and a silent substitution of a
+        stale address is an outage nobody sees.
+        """
+        if ip := cls._read_ga_conf_value("GA_SERVICES_IP"):
+            return ip
+        _LOGGER.error(
+            "GA_SERVICES_IP not found in any of %s - falling back to the"
+            " hardcoded %s, which may be stale",
+            ", ".join(str(path) for path in cls._GA_CONF_PATHS),
+            cls._GA_HARDCODED_FALLBACK_IP,
         )
+        return cls._GA_HARDCODED_FALLBACK_IP
 
     # Boot-race guard: if Supervisor starts before ga-resolve-ota.service
     # has populated /run/ga-resolve-ota.active, the fall-through to
