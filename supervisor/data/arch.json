@@ -9,6 +9,7 @@
   "odroid-m1": ["aarch64"],
   "odroid-n2": ["aarch64"],
   "khadas-vim3": ["aarch64"],
+  "tinker": ["armv7"],
   "generic-aarch64": ["aarch64"],
   "qemux86-64": ["amd64"],
   "qemuarm-64": ["aarch64"],

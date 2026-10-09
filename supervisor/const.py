@@ -431,8 +431,11 @@ ARCH_AARCH64 = "aarch64"
 ARCH_AMD64 = "amd64"
 ARCH_I386 = "i386"
 
-ARCH_ALL = [ARCH_AARCH64, ARCH_AMD64]
-ARCH_DEPRECATED = [ARCH_ARMHF, ARCH_ARMV7, ARCH_I386]
+# GA fork: armv7 stays a supported architecture. The GA iHost fleet (Sonoff
+# iHost, RV1126) is permanently 32-bit ARM, and GA builds its own armv7
+# Supervisor, plugins and Core. armhf and i386 stay deprecated as upstream.
+ARCH_ALL = [ARCH_ARMV7, ARCH_AARCH64, ARCH_AMD64]
+ARCH_DEPRECATED = [ARCH_ARMHF, ARCH_I386]
 ARCH_ALL_COMPAT = ARCH_ALL + ARCH_DEPRECATED
 
 MACHINE_DEPRECATED = [
@@ -443,7 +446,7 @@ MACHINE_DEPRECATED = [
     "raspberrypi2",
     "raspberrypi3",
     "raspberrypi4",
-    "tinker",
+    # GA fork: "tinker" is NOT deprecated - the iHost reports this machine.
 ]
 
 REPOSITORY_CORE = "core"
@@ -606,6 +609,7 @@ class BusEvent(StrEnum):
 class CpuArch(StrEnum):
     """Supported CPU architectures."""
 
+    ARMV7 = "armv7"  # GA fork: the iHost fleet
     AARCH64 = "aarch64"
     AMD64 = "amd64"
 

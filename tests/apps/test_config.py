@@ -239,7 +239,7 @@ def test_valid_basic_build():
 def test_valid_legacy_arch_values_for_migration():
     """Validate legacy arch values are accepted for migration compatibility."""
     config = load_json_fixture("basic-app-config.json")
-    config["arch"] = ["armv7", "amd64"]
+    config["arch"] = ["armhf", "amd64"]
 
     assert vd.SCHEMA_APP_CONFIG(config)
 
@@ -255,11 +255,22 @@ def test_valid_legacy_build_from_keys_for_migration():
 def test_warn_legacy_arch_values(caplog: pytest.LogCaptureFixture):
     """Warn when deprecated architecture values are present."""
     config = load_json_fixture("basic-app-config.json")
-    config["arch"] = ["armv7", "amd64"]
+    config["arch"] = ["armhf", "amd64"]
 
     vd.SCHEMA_APP_CONFIG(config)
 
     assert "uses deprecated 'arch' values" in caplog.text
+
+
+def test_armv7_app_is_not_deprecated(caplog: pytest.LogCaptureFixture):
+    """GA fork: armv7 is a supported app architecture (the iHost fleet)."""
+    config = load_json_fixture("basic-app-config.json")
+    config["arch"] = ["armv7"]
+    config["machine"] = ["tinker"]
+
+    assert vd.SCHEMA_APP_CONFIG(config)
+    assert "uses deprecated 'arch' values" not in caplog.text
+    assert "uses deprecated 'machine' values" not in caplog.text
 
 
 def test_warn_legacy_machine_values(caplog: pytest.LogCaptureFixture):
@@ -309,7 +320,7 @@ def test_quiet_schema_logs_advisories_at_debug(caplog: pytest.LogCaptureFixture)
     """SCHEMA_APP_CONFIG_QUIET emits the same advisories, but at debug level."""
     config = load_json_fixture("basic-app-config.json")
     config["advanced"] = True
-    config["arch"] = ["armv7", "amd64"]
+    config["arch"] = ["armhf", "amd64"]
 
     with caplog.at_level(logging.DEBUG, logger="supervisor.apps.validate"):
         vd.SCHEMA_APP_CONFIG_QUIET(config)

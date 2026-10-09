@@ -11,7 +11,7 @@ from supervisor.resolution.evaluations.system_architecture import (
 )
 
 
-@pytest.mark.parametrize("arch", ["i386", "armhf", "armv7"])
+@pytest.mark.parametrize("arch", ["i386", "armhf"])
 async def test_evaluation_unsupported_architectures(
     coresys: CoreSys,
     arch: str,
@@ -27,7 +27,8 @@ async def test_evaluation_unsupported_architectures(
         assert system_architecture.reason in coresys.resolution.unsupported
 
 
-@pytest.mark.parametrize("arch", ["amd64", "aarch64"])
+# GA fork: armv7 is supported - the GA iHost fleet is permanently 32-bit ARM.
+@pytest.mark.parametrize("arch", ["amd64", "aarch64", "armv7"])
 async def test_evaluation_supported_architectures(
     coresys: CoreSys,
     arch: str,

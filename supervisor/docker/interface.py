@@ -66,6 +66,7 @@ from .utils import (
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 MAP_ARCH: dict[CpuArch, str] = {
+    CpuArch.ARMV7: "linux/arm/v7",  # GA fork: the iHost fleet
     CpuArch.AARCH64: "linux/arm64",
     CpuArch.AMD64: "linux/amd64",
 }

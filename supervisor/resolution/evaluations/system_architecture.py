@@ -30,9 +30,16 @@ class EvaluateSystemArchitecture(EvaluateBase):
         return [CoreState.INITIALIZE]
 
     async def evaluate(self):
-        """Run evaluation."""
+        """Run evaluation.
+
+        GA fork: armv7 is not in the unsupported set. The GA iHost fleet is
+        permanently armv7 and GA serves its own version feed. Upstream flags
+        armv7, which adds UnsupportedReason.SYSTEM_ARCHITECTURE, which fails
+        JobCondition.ARCHITECTURE_SUPPORTED, which blocks Updater.fetch_data,
+        plugin updates and the Supervisor update: a fresh device would never
+        read its channel and never install Core.
+        """
         return self.sys_supervisor.arch in {
             "i386",
             "armhf",
-            "armv7",
         }
