@@ -4,6 +4,7 @@ import asyncio
 from ipaddress import IPv4Address
 import logging
 from pathlib import Path, PurePath
+import re
 import shutil
 import tarfile
 from tempfile import TemporaryDirectory
@@ -58,6 +59,24 @@ from .websocket import HomeAssistantWebSocket
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
+# GA fork (F1): architecture markers in a Core image name, per device arch.
+_ARCH_MARKERS: dict[str, set[str]] = {
+    "armv7": {"armv7", "armhf"},
+    "aarch64": {"aarch64", "arm64"},
+    "amd64": {"amd64", "x86_64"},
+}
+_ALL_ARCH_MARKERS = {"i386"} | set().union(*_ARCH_MARKERS.values())
+
+
+def _image_arch_markers(image: str) -> set[str]:
+    """Return the architecture markers in an image name (tag excluded)."""
+    name = image.rsplit("/", 1)
+    tail = name[-1].split(":", 1)[0]
+    tokens = set(re.split(r"[-_./]", "/".join([*name[:-1], tail]).lower()))
+    if "x86" in tokens and "64" in tokens:
+        tokens.add("x86_64")
+    return tokens & _ALL_ARCH_MARKERS
+
 
 HOMEASSISTANT_BACKUP_EXCLUDE = [
     "**/__pycache__/*",
@@ -95,6 +114,7 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
         self._core: HomeAssistantCore = HomeAssistantCore(coresys)
         self._secrets: HomeAssistantSecrets = HomeAssistantSecrets(coresys)
         self._http_server_host: list[str] | None = None
+        self._refused_channel_image: str | None = None
 
     @property
     def api(self) -> HomeAssistantAPI:
@@ -223,9 +243,43 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
         (#7092) from flagging the GA armv7 Core as a custom image: it compares
         against this property.
         """
-        if image := self.sys_updater.image_homeassistant:
+        if image := self.channel_image:
             return image
         return self.upstream_image
+
+    @property
+    def channel_image(self) -> str | None:
+        """Return the channel's Core image if it fits this device, else None.
+
+        GA fork (F1, measured on DUT2 2026-10-09): GA channels name
+        ghcr.io/greenautarky/home-assistant-armv7, an armv7-only build with
+        no placeholder. On an aarch64 device adopting it would pull an armv7
+        Core at the next update. A channel image is adopted only if it carries
+        a {machine}/{arch} placeholder (resolved for this device) or names no
+        architecture other than this device's. Otherwise it is refused
+        loudly (ERROR) and the caller keeps its current/upstream image.
+        """
+        if not (image := self.sys_updater.image_homeassistant):
+            return None
+        template = self.sys_updater.image_homeassistant_template or image
+        if "{machine}" in template or "{arch}" in template:
+            return image
+        arch = str(self.sys_arch.default)
+        foreign = _image_arch_markers(image) - _ARCH_MARKERS.get(arch, {arch})
+        if not foreign:
+            return image
+        if self._refused_channel_image != image:
+            self._refused_channel_image = image
+            _LOGGER.error(
+                "Refusing the channel's Home Assistant image %s: it is built for"
+                " %s, this device is %s. Keeping %s; fix the channel's"
+                " images.core (use a {machine} or {arch} placeholder).",
+                image,
+                "/".join(sorted(foreign)),
+                arch,
+                self._data.get(ATTR_IMAGE) or self.upstream_image,
+            )
+        return None
 
     @property
     def upstream_image(self) -> str:
@@ -267,7 +321,7 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
         """
         if self.override_image:
             return self.image
-        return self.sys_updater.image_homeassistant or self.default_image
+        return self.default_image
 
     @property
     def version(self) -> AwesomeVersion | None:

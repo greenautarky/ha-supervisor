@@ -1950,6 +1950,7 @@ def _channel_names_core_image(coresys: CoreSys, image: str) -> None:
 
 async def test_default_image_follows_channel(coresys: CoreSys):
     """The channel's images.core is the default Core image (2026-09-28)."""
+    coresys.arch._default_arch = CpuArch.ARMV7  # F1: the GA armv7 image fits armv7 only
     assert (
         coresys.homeassistant.default_image
         == "ghcr.io/home-assistant/qemux86-64-homeassistant"
@@ -1972,6 +1973,7 @@ async def test_core_load_keeps_running_upstream_image_when_channel_moves(
     Reconciling would remove the running image and pull GA:2025.11.3, which
     does not exist, and leave the device on the landing page.
     """
+    coresys.arch._default_arch = CpuArch.ARMV7  # F1: the GA armv7 image fits armv7 only
     coresys.homeassistant.set_image("ghcr.io/home-assistant/qemux86-64-homeassistant")
     coresys.homeassistant.version = AwesomeVersion("2025.11.3")
     container.show.return_value["State"]["Status"] = "running"
@@ -1995,6 +1997,7 @@ async def test_core_load_reconciles_to_channel_image_when_upstream_absent(
     coresys: CoreSys, container: MagicMock
 ):
     """Without the upstream image locally, load() reconciles to the channel image."""
+    coresys.arch._default_arch = CpuArch.ARMV7  # F1: the GA armv7 image fits armv7 only
     coresys.homeassistant.set_image("ghcr.io/home-assistant/qemux86-64-homeassistant")
     coresys.homeassistant.version = AwesomeVersion("2026.8.2")
     container.show.return_value["Config"] = {"Labels": {"io.hass.version": "2026.8.2"}}

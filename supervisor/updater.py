@@ -177,9 +177,20 @@ class Updater(FileConfiguration, CoreSysAttributes):
         """Return image of Home Assistant docker."""
         if ATTR_HOMEASSISTANT not in self._data[ATTR_IMAGE]:
             return None
-        return self._data[ATTR_IMAGE][ATTR_HOMEASSISTANT].format(
-            machine=self.sys_machine
-        )
+        template: str = self._data[ATTR_IMAGE][ATTR_HOMEASSISTANT]
+        if "{arch}" in template:
+            # GA fork (F1): a channel may name the Core image per arch.
+            return template.format(machine=self.sys_machine, arch=self.sys_arch.default)
+        return template.format(machine=self.sys_machine)
+
+    @property
+    def image_homeassistant_template(self) -> str | None:
+        """Return the Core image exactly as the channel names it (unresolved).
+
+        GA fork (F1): the Core image is only adopted if it fits this device,
+        and a {machine}/{arch} placeholder is part of that decision.
+        """
+        return self._data[ATTR_IMAGE].get(ATTR_HOMEASSISTANT)
 
     @property
     def image_supervisor(self) -> str | None:
