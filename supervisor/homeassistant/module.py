@@ -115,6 +115,7 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
         self._secrets: HomeAssistantSecrets = HomeAssistantSecrets(coresys)
         self._http_server_host: list[str] | None = None
         self._refused_channel_image: str | None = None
+        self._unknown_arch_channel_image: str | None = None
 
     @property
     def api(self) -> HomeAssistantAPI:
@@ -264,7 +265,19 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
         template = self.sys_updater.image_homeassistant_template or image
         if "{machine}" in template or "{arch}" in template:
             return image
-        arch = str(self.sys_arch.default)
+        if not (arch := self._device_arch()):
+            # Arch unknown even from the Supervisor container: no basis to
+            # refuse. Adopt (3451f6987 behaviour) - refusing would make load()
+            # reconcile a running GA armv7 Core back to an upstream image that
+            # has no 2026 armv7 tag.
+            if self._unknown_arch_channel_image != image:
+                self._unknown_arch_channel_image = image
+                _LOGGER.warning(
+                    "Device architecture unknown; adopting the channel's Home"
+                    " Assistant image %s without an architecture check.",
+                    image,
+                )
+            return image
         foreign = _image_arch_markers(image) - _ARCH_MARKERS.get(arch, {arch})
         if not foreign:
             return image
@@ -280,6 +293,22 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
                 self._data.get(ATTR_IMAGE) or self.upstream_image,
             )
         return None
+
+    def _device_arch(self) -> str | None:
+        """Return the device arch, also before CpuArchManager.load() ran.
+
+        GA fork (F1b, measured on K49 2026-10-12): Core.setup() loads
+        HomeAssistant (and with it HomeAssistantCore.load(), which reads
+        default_image) BEFORE CpuArchManager.load(), so sys_arch.default
+        raised AttributeError and Core was never managed. Fall back to the
+        Supervisor container's own arch label (io.hass.arch), which
+        Core.connect() loaded before setup(); it equals the device's
+        default arch on every GA device (armv7 iHost, aarch64 DSGW).
+        """
+        try:
+            return str(self.sys_arch.default)
+        except AttributeError:
+            return self.sys_supervisor.arch
 
     @property
     def upstream_image(self) -> str:

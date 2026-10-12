@@ -8,7 +8,7 @@ take over at the next Core update - an armv7 Core on an aarch64 device.
 # pylint: disable=protected-access
 
 import logging
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from awesomeversion import AwesomeVersion
 import pytest
@@ -142,3 +142,86 @@ async def test_aarch64_device_keeps_explicit_user_override(
 def test_image_arch_markers(image: str, markers: set[str]):
     """Arch markers are read from the image name only."""
     assert _image_arch_markers(image) == markers
+
+
+# F1b (K49, armv7 iHost, 2026-10-12): Core.setup() runs HomeAssistant.load()
+# before CpuArchManager.load(), so default_image was read with no arch loaded
+# and HomeAssistantCore.load() died with AttributeError('_default_arch').
+
+
+def _arch_not_loaded(coresys: CoreSys, supervisor_arch: str | None):
+    del coresys.arch._default_arch
+    coresys._supervisor.instance._meta = (
+        {"Config": {"Labels": {"io.hass.arch": supervisor_arch}}}
+        if supervisor_arch
+        else {"Config": {"Labels": {}}}
+    )
+
+
+async def test_arch_not_loaded_armv7_uses_supervisor_arch(
+    coresys: CoreSys, sys_machine: PropertyMock
+):
+    """K49: arch manager unloaded -> Supervisor arch armv7 -> GA image adopted."""
+    sys_machine.return_value = "ihost"
+    _arch_not_loaded(coresys, "armv7")
+    _channel(coresys, GA_ARMV7)
+
+    assert coresys.homeassistant.default_image == GA_ARMV7
+
+
+async def test_arch_not_loaded_aarch64_still_refuses(
+    coresys: CoreSys, sys_machine: PropertyMock
+):
+    """DSGW: arch manager unloaded -> Supervisor arch aarch64 -> still refused."""
+    sys_machine.return_value = "qemuarm-64"
+    _arch_not_loaded(coresys, "aarch64")
+    _channel(coresys, GA_ARMV7)
+
+    assert coresys.homeassistant.channel_image is None
+    assert (
+        coresys.homeassistant.default_image
+        == "ghcr.io/home-assistant/qemuarm-64-homeassistant"
+    )
+
+
+async def test_arch_fully_unknown_adopts_with_warning(
+    coresys: CoreSys, sys_machine: PropertyMock, caplog: pytest.LogCaptureFixture
+):
+    """No arch anywhere: adopt (no basis to refuse), WARNING once, never raise."""
+    sys_machine.return_value = "ihost"
+    _arch_not_loaded(coresys, None)
+    _channel(coresys, GA_ARMV7)
+
+    assert coresys.homeassistant.default_image == GA_ARMV7
+    _ = coresys.homeassistant.default_image
+    warns = [r for r in caplog.records if "architecture unknown" in r.getMessage()]
+    assert len(warns) == 1
+
+
+async def test_core_load_with_arch_not_loaded_does_not_raise(
+    coresys: CoreSys, sys_machine: PropertyMock
+):
+    """The K49 trace: HomeAssistantCore.load() before arch load must not raise."""
+    sys_machine.return_value = "ihost"
+    _arch_not_loaded(coresys, "armv7")
+    _channel(coresys, GA_ARMV7)
+    coresys.homeassistant._data[ATTR_IMAGE] = GA_ARMV7
+    coresys.homeassistant.version = AwesomeVersion("2026.10.0")
+    coresys.homeassistant.core.instance.attach = MagicMock()
+    coresys.homeassistant.core.instance.check_image = MagicMock()
+
+    async def _noop(*_a, **_k):
+        return None
+
+    coresys.homeassistant.core.instance.attach.side_effect = _noop
+    coresys.homeassistant.core.instance.check_image.side_effect = _noop
+    with patch.object(
+        type(coresys.homeassistant.core.instance),
+        "version",
+        new=PropertyMock(return_value=AwesomeVersion("2026.10.0")),
+    ):
+        await coresys.homeassistant.core.load()
+    # Running GA image is the default: nothing is reconciled away.
+    coresys.homeassistant.core.instance.check_image.assert_called_once_with(
+        AwesomeVersion("2026.10.0"), GA_ARMV7
+    )
