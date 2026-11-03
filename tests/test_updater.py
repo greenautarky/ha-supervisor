@@ -8,11 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 from awesomeversion import AwesomeVersion
 import pytest
 
-from supervisor.const import (
-    ATTR_HASSOS_UNRESTRICTED,
-    URL_HASSIO_VERSION,
-    CoreState,
-)
+from supervisor.const import ATTR_HASSOS_UNRESTRICTED, URL_HASSIO_VERSION, CoreState
 from supervisor.coresys import CoreSys
 from supervisor.dbus.const import ConnectivityState
 from supervisor.exceptions import UpdaterError, UpdaterJobError
