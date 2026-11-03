@@ -1,4 +1,15 @@
 ARG BUILD_FROM
+
+# Brotli 1.2.1 (CVE-2026-111497) publishes no cp313 musllinux armv7l wheel, on
+# PyPI or on the Home Assistant wheel index (measured 2026-11-03), and the
+# requirements install below runs with --no-build. Compile that one wheel here,
+# in a throwaway stage that carries the toolchain, and hand only the finished
+# wheel to the final image. Drop this stage once an armv7l wheel exists.
+FROM ${BUILD_FROM} AS brotli-wheel
+# hadolint ignore=DL3018
+RUN apk add --no-cache build-base \
+    && pip3 wheel --no-deps --wheel-dir /wheels brotli==1.2.1
+
 FROM ${BUILD_FROM}
 
 ENV \
@@ -74,6 +85,7 @@ RUN \
 # ships the cp313 musllinux armv7l wheels. Best-match picks the requested version from whichever index has a
 # matching wheel. Every direct dependency is pinned to an exact version.
 COPY requirements.txt .
+COPY --from=brotli-wheel /wheels /tmp/wheels
 RUN \
     if [ "${BUILD_ARCH}" = "i386" ]; then \
         setarch="linux32"; \
@@ -81,8 +93,9 @@ RUN \
         setarch=""; \
     fi \
     && ${setarch} uv pip install --compile-bytecode --no-cache --no-build \
-        --index-strategy unsafe-best-match -r requirements.txt \
-    && rm -f requirements.txt
+        --index-strategy unsafe-best-match --find-links /tmp/wheels \
+        -r requirements.txt \
+    && rm -rf requirements.txt /tmp/wheels
 
 # Install Home Assistant Supervisor
 COPY . supervisor
