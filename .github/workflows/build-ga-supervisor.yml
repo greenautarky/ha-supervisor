@@ -1,0 +1,159 @@
+name: Build greenautarky Supervisor image (2026.10 line, DEV/test only)
+
+# WP9.1 (Odoo #1489, epic #1488). Builds the GA Supervisor fork for armv7 AND
+# aarch64 and pushes DEV/STAGING tags only:
+#
+#   ghcr.io/greenautarky/<arch>-hassio-supervisor:ci-<short_sha>
+#   ghcr.io/greenautarky/<arch>-hassio-supervisor:dev-<GA_DEV_VERSION>
+#
+# It never writes a release tag and never touches `latest`. Nothing here
+# promotes an image to a channel or a device: that is the release train's job,
+# on an explicit trigger.
+#
+# Why this is not the upstream builder.yml: upstream builds amd64+aarch64 with
+# home-assistant/builder, which has no armv7 and needs Home Assistant's
+# infrastructure (wheel index credentials, cosign identities). The fork builds
+# with plain buildx.
+#
+# GATE ORDER: build (loaded, not pushed) -> smoke import -> CVE gate -> push.
+# GATE_MODE=report (set below) pushes the DEV tag even when the gate finds
+# fixable HIGH/CRITICAL and then fails the job, so a red run still leaves a
+# scannable test image. That is only acceptable because the tags are DEV tags;
+# a release workflow must block before the push.
+
+on:
+  push:
+    branches:
+      - "ga/2026.10.5-wp9-1"
+  workflow_dispatch: ~
+
+env:
+  GA_DEV_VERSION: "2026.10.5.1-dev"
+  GATE_MODE: report
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }} Supervisor
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            build_from: ghcr.io/home-assistant/base-python:3.14-alpine3.24-2026.10.3
+            install_python: "false"
+            wheels_stage: ga-wheels-none
+          - arch: armv7
+            runner: ubuntu-latest
+            platform: linux/arm/v7
+            # GA-owned Alpine 3.24 base (s6-overlay, bashio, tempio); no Python,
+            # Dockerfile installs it. See ga-addon-base, ADR-0016.
+            build_from: ghcr.io/greenautarky/ga-addon-base-armv7:3.24
+            install_python: "true"
+            wheels_stage: ga-wheels-armv7
+    env:
+      IMAGE: ghcr.io/greenautarky/${{ matrix.arch }}-hassio-supervisor
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: matrix.arch == 'armv7'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine tags
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "ci_tag=ci-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "dev_tag=dev-${GA_DEV_VERSION%-dev}" >> "$GITHUB_OUTPUT"
+          # The Dockerfile `bind` mounts ./wheels; upstream CI fills it, here it is empty.
+          mkdir -p wheels
+
+      - name: Build (load, no push yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            BUILD_FROM=${{ matrix.build_from }}
+            BUILD_VERSION=${{ env.GA_DEV_VERSION }}
+            GA_INSTALL_PYTHON=${{ matrix.install_python }}
+            GA_WHEELS_STAGE=${{ matrix.wheels_stage }}
+          labels: |
+            io.hass.type=supervisor
+            io.hass.arch=${{ matrix.arch }}
+            io.hass.version=${{ env.GA_DEV_VERSION }}
+            org.opencontainers.image.title=Home Assistant Supervisor (GA fork)
+            org.opencontainers.image.version=${{ env.GA_DEV_VERSION }}
+            org.opencontainers.image.source=https://github.com/greenautarky/ha-supervisor
+            org.greenautarky.build-mode=DEV
+            org.greenautarky.staging-tag=${{ steps.meta.outputs.ci_tag }}
+          tags: local/${{ matrix.arch }}-hassio-supervisor:scan
+
+      # Imports the compiled dependencies the armv7 wheel stage had to build.
+      # A green build that cannot import them is the failure this step exists for.
+      - name: Smoke - the app and its native dependencies import
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} --entrypoint python3 \
+            local/${{ matrix.arch }}-hassio-supervisor:scan -c "
+          import sys, brotli, certifi, cryptography, orjson, yaml, dbus_fast, ciso8601, aiohttp
+          import supervisor.const as c
+          print('python', sys.version.split()[0])
+          print('supervisor', c.SUPERVISOR_VERSION)
+          print('brotli', brotli.__version__, 'certifi', certifi.__version__, 'cryptography', cryptography.__version__)
+          assert c.SUPERVISOR_VERSION == '${{ env.GA_DEV_VERSION }}', c.SUPERVISOR_VERSION
+          "
+
+      - name: CVE GATE - distro packages (fixable HIGH/CRITICAL)
+        id: gate
+        continue-on-error: ${{ env.GATE_MODE == 'report' }}
+        run: scripts/cve-gate.sh local/${{ matrix.arch }}-hassio-supervisor:scan
+
+      - name: CVE report - bundled libraries (visibility)
+        if: always()
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image --platform ${{ matrix.platform }} \
+            --scanners vuln --pkg-types library --severity HIGH,CRITICAL \
+            --exit-code 0 --no-progress \
+            local/${{ matrix.arch }}-hassio-supervisor:scan
+
+      - name: Push DEV tags
+        run: |
+          set -euo pipefail
+          pushed=0
+          for t in "${IMAGE}:${{ steps.meta.outputs.ci_tag }}" "${IMAGE}:${{ steps.meta.outputs.dev_tag }}"; do
+            docker tag local/${{ matrix.arch }}-hassio-supervisor:scan "$t"
+            docker push "$t"
+            pushed=$((pushed + 1))
+          done
+          [ "$pushed" -gt 0 ] || { echo "::error::nothing pushed"; exit 1; }
+          echo "Pushed $pushed DEV tag(s) for ${{ matrix.arch }}."
+
+      - name: Fail the job if the gate found something
+        if: steps.gate.outcome == 'failure'
+        run: |
+          echo "::error::CVE gate failed (GATE_MODE=report: the DEV image was pushed for inspection)."
+          exit 1
