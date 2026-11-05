@@ -60,7 +60,7 @@ jobs:
 
       - name: CVE scan of the pinned source (coverage rule; exit 1 = findings, reported)
         run: |
-          set -uo pipefail
+          set +e; set -uo pipefail
           docker pull --platform linux/arm64 "${SRC}@${{ matrix.digest }}"
           scripts/cve-gate.sh "${SRC}@${{ matrix.digest }}"; rc=$?
           echo "cve-gate rc=$rc (0 clean, 1 fixable findings in upstream content, 2 broken scan)"
