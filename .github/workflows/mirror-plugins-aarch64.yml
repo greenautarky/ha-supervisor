@@ -34,13 +34,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { slug: dns,       up_tag: "2026.09.0", digest: "sha256:9507ace6b8a1671225b9279b7d61e83496d966dd50ff75a6acbe6f545a901aab", alias: "2026.09.1" }
-          - { slug: audio,     up_tag: "2025.08.0", digest: "sha256:6738b10ac9011d46e97f283b154c8d616fd6bbf1bf382c1eb41acdc2f18854ec", alias: "2025.08.1" }
-          - { slug: cli,       up_tag: "2025.10.0", digest: "sha256:ac27573c71e02c5ec25db2799a3e485230bd6c077a6539d924cfa6578e941fbb", alias: "2025.10.2" }
-          - { slug: multicast, up_tag: "2025.08.0", digest: "sha256:a412977f1382cfe6dd053c0e1c6744da4c36762a5c8e580ece777887bdfef30a", alias: "2025.08.1" }
+          - { slug: dns,       up_tag: "2026.10.0", digest: "sha256:a934744305ddcdeb17e66ea8275e51c56ed2e68d4281f94a0d913a26be435a55", alias: "2026.10.0" }
+          - { slug: audio,     up_tag: "2026.10.0", digest: "sha256:d74fd89ac0797614ca0b92291f93151fa5f05d5ce272b814593ec4a11adb3a75", alias: "2026.10.0" }
+          - { slug: cli,       up_tag: "2026.10.1", digest: "sha256:23441d3668cb9edad0af0eb0ba2f683d777fed9fdc09dbc47e78bb19d4670603", alias: "2026.10.1" }
+          - { slug: multicast, up_tag: "2026.10.0", digest: "sha256:28d29bebdca78e6255454e756009f295412fa517b4145a0f06ac783de745aa35", alias: "2026.10.0" }
           - { slug: supervisor, up_tag: "2025.11.5", digest: "sha256:e0080cb7426f3ed776104942f50c40831e7e0e5e869e7bd70d587fb9dc83f979", alias: "2025.11.5" }
           # observer: no OS package DB (Go binary on minimal base) -> scan=binary (gobinary modules, fail closed on 0)
-          - { slug: observer,  up_tag: "2025.02.0", digest: "sha256:fe4f0ad0515541bd4acccbde25f2c55c4e532be6634aa6f7eca59d4cea9bce2c", alias: "2025.02.1", scan: binary }
+          - { slug: observer,  up_tag: "2026.08.0", digest: "sha256:a1da54df071945e0c20918f6fc7641f5440d94eb6fdeb6eac797f937b28bf495", alias: "2026.08.0", scan: binary }
     env:
       SRC: ghcr.io/home-assistant/aarch64-hassio-${{ matrix.slug }}
       DST: ghcr.io/greenautarky/aarch64-hassio-${{ matrix.slug }}
