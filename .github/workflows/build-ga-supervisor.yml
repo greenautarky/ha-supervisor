@@ -4,7 +4,7 @@ name: Build greenautarky Supervisor image (2026.10 line, DEV/test only)
 # aarch64 and pushes DEV/STAGING tags only:
 #
 #   ghcr.io/greenautarky/<arch>-hassio-supervisor:ci-<short_sha>
-#   ghcr.io/greenautarky/<arch>-hassio-supervisor:dev-<GA_DEV_VERSION>
+#   ghcr.io/greenautarky/<arch>-hassio-supervisor:<GA_DEV_VERSION>
 #
 # It never writes a release tag and never touches `latest`. Nothing here
 # promotes an image to a channel or a device: that is the release train's job,
@@ -28,8 +28,8 @@ on:
   workflow_dispatch: ~
 
 env:
-  GA_DEV_VERSION: "2026.10.5.1-dev"
-  GATE_MODE: report
+  GA_DEV_VERSION: "2026.10.5.1"
+  GATE_MODE: block
 
 permissions:
   contents: read
@@ -85,7 +85,7 @@ jobs:
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           echo "ci_tag=ci-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "dev_tag=dev-${GA_DEV_VERSION%-dev}" >> "$GITHUB_OUTPUT"
+          echo "dev_tag=${GA_DEV_VERSION}" >> "$GITHUB_OUTPUT"
           # The Dockerfile `bind` mounts ./wheels; upstream CI fills it, here it is empty.
           mkdir -p wheels
 
@@ -144,7 +144,17 @@ jobs:
         run: |
           set -euo pipefail
           pushed=0
-          for t in "${IMAGE}:${{ steps.meta.outputs.ci_tag }}" "${IMAGE}:${{ steps.meta.outputs.dev_tag }}"; do
+          # The version tag is immutable: tag == io.hass.version == const.py, and a
+          # device pulls by it. If it already exists, push only the ci tag.
+          VER_REF="${IMAGE}:${{ steps.meta.outputs.dev_tag }}"
+          tags=("${IMAGE}:${{ steps.meta.outputs.ci_tag }}")
+          if docker buildx imagetools inspect "$VER_REF" >/dev/null 2>&1; then
+            echo "::notice::$VER_REF already exists - tags are immutable, pushing only the ci tag"
+            echo "version tag kept: $(docker buildx imagetools inspect "$VER_REF" | sed -n 's/^Digest: *//p')" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            tags+=("$VER_REF")
+          fi
+          for t in "${tags[@]}"; do
             docker tag local/${{ matrix.arch }}-hassio-supervisor:scan "$t"
             docker push "$t"
             pushed=$((pushed + 1))
