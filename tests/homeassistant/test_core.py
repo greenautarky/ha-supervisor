@@ -1042,10 +1042,98 @@ async def test_core_load_allows_image_override(
 
     container.delete.assert_not_called()
     coresys.docker.images.delete.assert_not_called()
-    coresys.docker.images.inspect.assert_not_called()
+    # The override is verified against the local image store (#706), not
+    # blindly trusted - but never removed or re-pulled when satisfiable.
+    coresys.docker.images.inspect.assert_called_once_with(
+        "ghcr.io/home-assistant/odroid-n2-homeassistant:2024.4.0"
+    )
+    coresys.docker.images.pull.assert_not_called()
     assert (
         coresys.homeassistant.image == "ghcr.io/home-assistant/odroid-n2-homeassistant"
     )
+    assert coresys.homeassistant.override_image is True
+
+
+async def test_core_load_override_not_clobbered_by_running_container(
+    coresys: CoreSys, container: MagicMock
+):
+    """Test a locally satisfiable image override survives startup reconciliation (#706).
+
+    Measured on device (Odoo #706, T3-DROPIN.md par.7): homeassistant.json held
+    image=ghcr.io/greenautarky/home-assistant-armv7 version=2026.8.2 with the
+    image present locally at exactly that tag, while the running container was
+    still on the old version. Supervisor start reverted the json to the
+    attached container's state and started the old Core.
+    """
+    coresys.homeassistant.set_image("ghcr.io/greenautarky/home-assistant-armv7")
+    coresys.homeassistant.version = AwesomeVersion("2026.8.2")
+    coresys.homeassistant.override_image = True
+
+    # Running container is still on the OLD version
+    container.show.return_value["State"]["Status"] = "running"
+    container.show.return_value["State"]["Running"] = True
+    container.show.return_value["Config"] = {"Labels": {"io.hass.version": "2025.11.3"}}
+
+    await coresys.homeassistant.core.load()
+
+    # Override image:version was present locally -> json must keep the override
+    assert coresys.homeassistant.image == "ghcr.io/greenautarky/home-assistant-armv7"
+    assert coresys.homeassistant.version == AwesomeVersion("2026.8.2")
+    assert coresys.homeassistant.override_image is True
+    # And nothing was removed or re-pulled towards the default image
+    container.delete.assert_not_called()
+    coresys.docker.images.delete.assert_not_called()
+    coresys.docker.images.pull.assert_not_called()
+
+
+async def test_core_load_abandons_unsatisfiable_override_loudly(
+    coresys: CoreSys, container: MagicMock, caplog: pytest.LogCaptureFixture
+):
+    """Test an override that is absent locally and unpullable falls back loudly (#706).
+
+    The fail-safe fallback to the default image is deliberate fleet
+    robustness - but it must WARN about abandoning the override, clear the
+    override flag, and reconcile the json, never revert silently.
+    """
+    coresys.homeassistant.set_image("ghcr.io/greenautarky/home-assistant-armv7")
+    coresys.homeassistant.version = AwesomeVersion("2026.8.2")
+    coresys.homeassistant.override_image = True
+
+    container.show.return_value["State"]["Status"] = "running"
+    container.show.return_value["State"]["Running"] = True
+    container.show.return_value["Config"] = {"Labels": {"io.hass.version": "2025.11.3"}}
+
+    default_image = coresys.homeassistant.default_image
+    good_image = {
+        "Os": "linux",
+        "Architecture": "amd64",
+        "Id": "abc123",
+        "Config": {"Labels": {"io.hass.version": "2026.8.2"}},
+    }
+
+    async def mock_inspect(name: str):
+        if name.startswith("ghcr.io/greenautarky/"):
+            raise aiodocker.DockerError(
+                HTTPStatus.NOT_FOUND, {"message": "no such image"}
+            )
+        return good_image
+
+    coresys.docker.images.inspect.side_effect = mock_inspect
+
+    def mock_pull(image_ref, *args, **kwargs):
+        if str(image_ref).startswith("ghcr.io/greenautarky/"):
+            raise aiodocker.DockerError(
+                HTTPStatus.NOT_FOUND, {"message": "manifest unknown"}
+            )
+        return AsyncIterator([{}])
+
+    coresys.docker.images.pull.side_effect = mock_pull
+
+    await coresys.homeassistant.core.load()
+
+    assert "Abandoning Home Assistant image override" in caplog.text
+    assert coresys.homeassistant.override_image is False
+    assert coresys.homeassistant.image == default_image
 
 
 async def test_install_landingpage_uses_overridden_image(coresys: CoreSys):
@@ -1850,3 +1938,87 @@ async def test_release_port_handles_dbus_disconnect_mid_call(
         await coresys.homeassistant.core.release_port()
 
     assert coresys.homeassistant.core._port_reserved is True
+
+
+GA_CORE_IMAGE = "ghcr.io/greenautarky/home-assistant-armv7"
+
+
+def _channel_names_core_image(coresys: CoreSys, image: str) -> None:
+    """Simulate a fetched channel version.json whose images.core is `image`."""
+    coresys.updater._data["image"]["homeassistant"] = image  # noqa: SLF001
+
+
+async def test_default_image_follows_channel(coresys: CoreSys):
+    """The channel's images.core is the default Core image (2026-09-28)."""
+    coresys.arch._default_arch = CpuArch.ARMV7  # F1: the GA armv7 image fits armv7 only
+    assert (
+        coresys.homeassistant.default_image
+        == "ghcr.io/home-assistant/qemux86-64-homeassistant"
+    )
+    _channel_names_core_image(coresys, GA_CORE_IMAGE)
+    assert coresys.homeassistant.default_image == GA_CORE_IMAGE
+    _channel_names_core_image(coresys, "ghcr.io/home-assistant/{machine}-homeassistant")
+    assert (
+        coresys.homeassistant.default_image
+        == "ghcr.io/home-assistant/qemux86-64-homeassistant"
+    )
+
+
+async def test_core_load_keeps_running_upstream_image_when_channel_moves(
+    coresys: CoreSys, container: MagicMock, caplog: pytest.LogCaptureFixture
+):
+    """A device still on the upstream image is not torn down on restart.
+
+    The channel names the GA image, which has no tag for the old version.
+    Reconciling would remove the running image and pull GA:2025.11.3, which
+    does not exist, and leave the device on the landing page.
+    """
+    coresys.arch._default_arch = CpuArch.ARMV7  # F1: the GA armv7 image fits armv7 only
+    coresys.homeassistant.set_image("ghcr.io/home-assistant/qemux86-64-homeassistant")
+    coresys.homeassistant.version = AwesomeVersion("2025.11.3")
+    container.show.return_value["State"]["Status"] = "running"
+    container.show.return_value["State"]["Running"] = True
+    container.show.return_value["Config"] = {"Labels": {"io.hass.version": "2025.11.3"}}
+    _channel_names_core_image(coresys, GA_CORE_IMAGE)
+
+    await coresys.homeassistant.core.load()
+
+    assert "takes over at the next Core update" in caplog.text
+    container.delete.assert_not_called()
+    coresys.docker.images.delete.assert_not_called()
+    coresys.docker.images.pull.assert_not_called()
+    assert (
+        coresys.homeassistant.image == "ghcr.io/home-assistant/qemux86-64-homeassistant"
+    )
+    assert coresys.homeassistant.version == AwesomeVersion("2025.11.3")
+
+
+async def test_core_load_reconciles_to_channel_image_when_upstream_absent(
+    coresys: CoreSys, container: MagicMock
+):
+    """Without the upstream image locally, load() reconciles to the channel image."""
+    coresys.arch._default_arch = CpuArch.ARMV7  # F1: the GA armv7 image fits armv7 only
+    coresys.homeassistant.set_image("ghcr.io/home-assistant/qemux86-64-homeassistant")
+    coresys.homeassistant.version = AwesomeVersion("2026.8.2")
+    container.show.return_value["Config"] = {"Labels": {"io.hass.version": "2026.8.2"}}
+    _channel_names_core_image(coresys, GA_CORE_IMAGE)
+
+    good_image = {
+        "Os": "linux",
+        "Architecture": "amd64",
+        "Id": "abc123",
+        "Config": {"Labels": {"io.hass.version": "2026.8.2"}},
+    }
+
+    async def mock_inspect(name: str):
+        if name.startswith("ghcr.io/home-assistant/"):
+            raise aiodocker.DockerError(
+                HTTPStatus.NOT_FOUND, {"message": "no such image"}
+            )
+        return good_image
+
+    coresys.docker.images.inspect.side_effect = mock_inspect
+
+    await coresys.homeassistant.core.load()
+
+    assert coresys.homeassistant.image == GA_CORE_IMAGE

@@ -25,7 +25,7 @@ async def test_check(coresys: CoreSys, install_app_ssh: App):
     await deprecated_arch_app()
     assert len(coresys.resolution.issues) == 0
 
-    install_app_ssh.data["arch"] = ["armv7"]
+    install_app_ssh.data["arch"] = ["armhf"]
 
     await deprecated_arch_app()
 
@@ -44,7 +44,7 @@ async def test_check_ignores_mixed_supported_arch(
     deprecated_arch_app = CheckDeprecatedArchApp(coresys)
     await coresys.core.set_state(CoreState.SETUP)
 
-    install_app_ssh.data["arch"] = ["armv7", "amd64"]
+    install_app_ssh.data["arch"] = ["armhf", "amd64"]
 
     await deprecated_arch_app()
 
@@ -85,7 +85,7 @@ async def test_check_ignores_stage_deprecated(coresys: CoreSys, install_app_ssh:
     await coresys.core.set_state(CoreState.SETUP)
 
     install_app_ssh.data["stage"] = AppStage.DEPRECATED
-    install_app_ssh.data["arch"] = ["armv7"]
+    install_app_ssh.data["arch"] = ["armhf"]
 
     await deprecated_arch_app()
 
@@ -108,7 +108,7 @@ async def test_approve(coresys: CoreSys, install_app_ssh: App):
         is False
     )
 
-    install_app_ssh.data["arch"] = ["armv7"]
+    install_app_ssh.data["arch"] = ["armhf"]
 
     assert (
         await deprecated_arch_app.approve_check(
@@ -121,7 +121,7 @@ async def test_approve(coresys: CoreSys, install_app_ssh: App):
         is True
     )
 
-    install_app_ssh.data["arch"] = ["armv7", "amd64"]
+    install_app_ssh.data["arch"] = ["armhf", "amd64"]
 
     assert (
         await deprecated_arch_app.approve_check(

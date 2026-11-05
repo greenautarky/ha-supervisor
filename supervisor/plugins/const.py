@@ -13,6 +13,12 @@ FILE_HASSIO_OBSERVER = Path(SUPERVISOR_DATA, "observer.json")
 FILE_HASSIO_MULTICAST = Path(SUPERVISOR_DATA, "multicast.json")
 
 ATTR_FALLBACK = "fallback"
+
+# GA defaults for hassio_dns plugin. Used by both the schema (initial value when
+# no persisted dns.json exists) and reset() (factory-reset state). Keep both in sync.
+GA_DEFAULT_DNS_SERVERS = ("dns://1.1.1.1", "dns://1.0.0.1")
+GA_DEFAULT_DNS_FALLBACK = False
+
 WATCHDOG_RETRY_SECONDS = 10
 WATCHDOG_MAX_ATTEMPTS = 5
 WATCHDOG_THROTTLE_PERIOD = timedelta(minutes=30)

@@ -4,7 +4,7 @@ from contextlib import suppress
 from datetime import timedelta
 import json
 import logging
-from typing import Any
+from typing import Any, Self
 
 import aiohttp
 from awesomeversion import AwesomeVersion
@@ -32,6 +32,7 @@ from .const import (
 )
 from .coresys import CoreSys, CoreSysAttributes
 from .exceptions import UpdaterError, UpdaterJobError
+from .ga_version_url import URL_GA_VERSION_PREFIX, read_version_url_template
 from .jobs.const import JobConcurrency, JobThrottle
 from .jobs.decorator import Job, JobCondition
 from .utils.common import FileConfiguration
@@ -48,6 +49,18 @@ class Updater(FileConfiguration, CoreSysAttributes):
         super().__init__(FILE_HASSIO_UPDATER, SCHEMA_UPDATER_CONFIG)
         self.coresys = coresys
         self._connectivity_listener: EventListener | None = None
+        self._version_url: str = URL_HASSIO_VERSION
+
+    async def load_config(self) -> Self:
+        """Read config and the version URL base provided by the host (GA fork)."""
+        await super().load_config()
+        self._version_url = await self.sys_run_in_executor(read_version_url_template)
+        return self
+
+    @property
+    def version_url(self) -> str:
+        """Return the version URL template ({channel} placeholder)."""
+        return self._version_url
 
     async def load(self) -> None:
         """Update internal data."""
@@ -164,9 +177,20 @@ class Updater(FileConfiguration, CoreSysAttributes):
         """Return image of Home Assistant docker."""
         if ATTR_HOMEASSISTANT not in self._data[ATTR_IMAGE]:
             return None
-        return self._data[ATTR_IMAGE][ATTR_HOMEASSISTANT].format(
-            machine=self.sys_machine
-        )
+        template: str = self._data[ATTR_IMAGE][ATTR_HOMEASSISTANT]
+        if "{arch}" in template:
+            # GA fork (F1): a channel may name the Core image per arch.
+            return template.format(machine=self.sys_machine, arch=self.sys_arch.default)
+        return template.format(machine=self.sys_machine)
+
+    @property
+    def image_homeassistant_template(self) -> str | None:
+        """Return the Core image exactly as the channel names it (unresolved).
+
+        GA fork (F1): the Core image is only adopted if it fits this device,
+        and a {machine}/{arch} placeholder is part of that decision.
+        """
+        return self._data[ATTR_IMAGE].get(ATTR_HOMEASSISTANT)
 
     @property
     def image_supervisor(self) -> str | None:
@@ -265,8 +289,18 @@ class Updater(FileConfiguration, CoreSysAttributes):
 
         Is a coroutine.
         """
-        url = URL_HASSIO_VERSION.format(channel=self.channel)
+        url = self.version_url.format(channel=self.channel)
         machine = self.sys_machine or "default"
+
+        # GA fork: never read a feed outside greenautarky/haos-version. The
+        # template is validated where it is read; this holds the invariant at
+        # the one place a request goes out, so a future default or code path
+        # that reintroduces the upstream feed fails loudly instead.
+        if not url.startswith(URL_GA_VERSION_PREFIX):
+            raise UpdaterError(
+                f"Refusing to fetch versions from {url}: not a GA version feed",
+                _LOGGER.error,
+            )
 
         # Get data
         try:

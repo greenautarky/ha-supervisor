@@ -71,3 +71,25 @@ async def test_did_run(coresys: CoreSys):
             await evaluation()
             evaluate.assert_not_called()
             evaluate.reset_mock()
+
+
+async def test_channel_named_core_image_is_not_custom(coresys: CoreSys):
+    """GA fork: the Core image the channel names is the default, not a fork.
+
+    The GA armv7 Core build is named by the channel (images.core). It must not
+    mark the system unsupported, and an image the channel does NOT name still
+    must.
+    """
+    evaluation = EvaluateHomeAssistantCoreCustomImage(coresys)
+    await coresys.core.set_state(CoreState.RUNNING)
+    coresys.updater._data["image"]["homeassistant"] = (  # pylint: disable=protected-access
+        "ghcr.io/greenautarky/{machine}-homeassistant"
+    )
+
+    coresys.homeassistant.set_image("ghcr.io/greenautarky/qemux86-64-homeassistant")
+    await evaluation()
+    assert evaluation.reason not in coresys.resolution.unsupported
+
+    coresys.homeassistant.set_image("ghcr.io/home-assistant/qemux86-64-homeassistant")
+    await evaluation()
+    assert evaluation.reason in coresys.resolution.unsupported

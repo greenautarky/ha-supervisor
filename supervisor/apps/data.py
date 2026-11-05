@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from ..const import (
+    ATTR_AUDIO_OUTPUT,
     ATTR_IMAGE,
     ATTR_OPTIONS,
     ATTR_SYSTEM,
@@ -18,6 +19,9 @@ from .app import App
 from .validate import SCHEMA_APPS_FILE
 
 Config = dict[str, Any]
+
+# GA fork: PulseAudio sink of the Sonoff iHost speaker.
+IHOST_FALLBACK_AUDIO_SINK = "alsa_output.1.stereo-fallback"
 
 
 class AppsData(FileConfiguration, CoreSysAttributes):
@@ -45,6 +49,13 @@ class AppsData(FileConfiguration, CoreSysAttributes):
             ATTR_OPTIONS: {},
             ATTR_VERSION: app.version,
             ATTR_IMAGE: app.image,
+            # GA fork: on the iHost, audio apps default to the board's
+            # stereo fallback sink (the default sink is not the speaker).
+            ATTR_AUDIO_OUTPUT: (
+                IHOST_FALLBACK_AUDIO_SINK
+                if app.with_audio and self.sys_os.board == "ihost"
+                else None
+            ),
         }
         await self.save_data()
 

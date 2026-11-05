@@ -7,6 +7,7 @@ import pytest
 
 from supervisor.const import CoreState
 from supervisor.coresys import CoreSys
+from supervisor.plugins.const import GA_DEFAULT_DNS_SERVERS
 from supervisor.resolution.checks.dns_server import CheckDNSServer
 from supervisor.resolution.const import ContextType, IssueType
 from supervisor.resolution.data import Issue
@@ -68,15 +69,20 @@ async def test_approve(coresys: CoreSys, supervisor_internet, dns_query: AsyncMo
     dns_server = CheckDNSServer(coresys)
     await coresys.core.set_state(CoreState.RUNNING)
 
-    assert dns_server.dns_servers == ["dns://192.168.30.1"]
+    assert dns_server.dns_servers == [
+        *GA_DEFAULT_DNS_SERVERS,
+        "dns://192.168.30.1",
+    ]
     dns_query.side_effect = DNSError()
 
+    # GA fork: dns://1.1.1.1 is a GA default, i.e. one of ours - use an address
+    # that is genuinely not in the list to test the negative case.
     assert (
         await dns_server.approve_check(
             Issue(
                 IssueType.DNS_SERVER_FAILED,
                 ContextType.DNS_SERVER,
-                reference="dns://1.1.1.1",
+                reference="dns://8.8.4.4",
             )
         )
         is False

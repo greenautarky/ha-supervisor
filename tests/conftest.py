@@ -60,6 +60,7 @@ from supervisor.exceptions import HostLogError
 from supervisor.homeassistant.api import APIState
 from supervisor.host.logs import LogsControl
 from supervisor.os.manager import OSManager
+from supervisor.plugins.dns import PluginDns
 from supervisor.store.app import AppStore
 from supervisor.store.repository import Repository
 from supervisor.utils.dt import utcnow
@@ -96,6 +97,21 @@ def _snapshot_tree(path: Path) -> dict[Path, tuple[int, int]]:
         entry: (entry.stat().st_ino, entry.stat().st_mtime_ns)
         for entry in path.rglob("*")
     }
+
+
+@pytest.fixture(autouse=True)
+def ga_ota_active_no_wait():
+    """GA fork: do not wait fifteen seconds for a device file absent here.
+
+    PluginDns._load_ga_ota_ip polls /run/ga-resolve-ota.active for up to
+    _GA_OTA_ACTIVE_WAIT_S seconds, which is right on a device (the file
+    appears within about a second and the wait closes a real boot race).
+    Under test the file never appears. This patches the ENVIRONMENT, not the
+    subject: the waiting itself is asserted in tests/plugins/test_dns_ota_wait.py,
+    which opts out of this fixture.
+    """
+    with patch.object(PluginDns, "_GA_OTA_ACTIVE_WAIT_S", 0):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -593,6 +609,11 @@ async def coresys(
     with (
         patch("supervisor.bootstrap.initialize_system"),
         patch("supervisor.utils.sentry.sentry_sdk.init"),
+        # GA fork, hermetic: never read the test host's /etc/ga-version-url
+        patch(
+            "supervisor.ga_version_url.FILE_GA_VERSION_URL",
+            Path("/nonexistent/ga-version-url"),
+        ),
         patch("supervisor.core.Core._write_run_state"),
     ):
         coresys_obj = await initialize_coresys()

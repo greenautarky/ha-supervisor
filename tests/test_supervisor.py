@@ -42,6 +42,28 @@ async def test_connectivity_check(
     assert coresys.supervisor.connectivity is connectivity
 
 
+async def test_connectivity_check_github_fallback(
+    coresys: CoreSys, websession: MagicMock
+):
+    """GA fork: a blocked checkonline URL does not mean "no internet".
+
+    Primary probe fails, github.com answers: online. Both fail: offline.
+    """
+    websession.head = AsyncMock(side_effect=[ClientError(), None])
+    coresys.supervisor._update_connectivity(False)  # pylint: disable=protected-access
+    await coresys.supervisor.check_and_update_connectivity(force=True)
+
+    assert coresys.supervisor.connectivity is True
+    assert websession.head.call_count == 2
+    assert websession.head.call_args_list[1][0][0] == "https://github.com"
+
+    websession.head = AsyncMock(side_effect=[ClientError(), ClientError()])
+    await coresys.supervisor.check_and_update_connectivity(force=True)
+
+    assert coresys.supervisor.connectivity is False
+    assert websession.head.call_count == 2
+
+
 async def test_connectivity_check_min_interval_when_connected(
     coresys: CoreSys, websession: MagicMock
 ):

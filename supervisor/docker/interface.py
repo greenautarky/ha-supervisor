@@ -66,6 +66,7 @@ from .utils import (
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 MAP_ARCH: dict[CpuArch, str] = {
+    CpuArch.ARMV7: "linux/arm/v7",  # GA fork: the iHost fleet
     CpuArch.AARCH64: "linux/arm64",
     CpuArch.AMD64: "linux/amd64",
 }
@@ -409,10 +410,17 @@ class DockerInterface(JobGroup, ABC):
 
         self._meta = docker_image
 
-    async def exists(self) -> bool:
-        """Return True if Docker image exists in local repository."""
+    async def exists(self, version: AwesomeVersion | None = None) -> bool:
+        """Return True if Docker image exists in local repository.
+
+        By default the version from container/image metadata is checked. Pass
+        `version` explicitly to check a specific tag (e.g. the stored
+        user-override version before any container was created from it, #706).
+        """
+        if version is None:
+            version = self.version
         with suppress(aiodocker.DockerError, TimeoutError):
-            await self.sys_docker.images.inspect(f"{self.image}:{self.version!s}")
+            await self.sys_docker.images.inspect(f"{self.image}:{version!s}")
             return True
         return False
 
