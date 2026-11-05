@@ -96,8 +96,19 @@ jobs:
       - name: Push
         run: |
           set -euo pipefail
-          for t in "${IMAGE}:${{ steps.meta.outputs.version }}" "${IMAGE}:${{ steps.meta.outputs.ci_tag }}"; do
+          # A release tag is immutable: devices pull by version, so the same version
+          # must never point at different content. Measured 2026-11-05: every push
+          # to this branch rebuilt and re-pushed 2025.11.5.10 (13ee5591… -> 95db6d5a…).
+          # If the version tag already exists, push only the ci tag and say so.
+          VER_REF="${IMAGE}:${{ steps.meta.outputs.version }}"
+          tags=("${IMAGE}:${{ steps.meta.outputs.ci_tag }}")
+          if docker buildx imagetools inspect "$VER_REF" >/dev/null 2>&1; then
+            echo "::notice::$VER_REF already exists — release tags are immutable, pushing only the ci tag"
+            echo "release tag kept: $(docker buildx imagetools inspect "$VER_REF" | sed -n 's/^Digest: *//p')" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            tags+=("$VER_REF")
+          fi
+          for t in "${tags[@]}"; do
             docker tag local/aarch64-hassio-supervisor:scan "$t"
             docker push "$t"
           done
-          docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${{ steps.meta.outputs.version }}" | tee -a "$GITHUB_STEP_SUMMARY"
