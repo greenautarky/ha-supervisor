@@ -1,0 +1,80 @@
+name: Mirror upstream aarch64 Supervisor plugins into ghcr.io/greenautarky
+
+# Odoo #1485 / WP9.1. Upstream still publishes aarch64 plugin images (it only
+# dropped armv7), so for aarch64 we MIRROR by digest instead of rebuilding.
+# The digests below are the pin; the mirror is byte-identical (same manifest).
+# Each source is CVE-scanned with the coverage rule (exit 2 = scan covered
+# nothing = fail). Findings (exit 1) are reported, not blocking: the content is
+# upstream's and a mirror cannot fix it.
+#
+# Tags published per plugin: the upstream tag (honest) and the tag our armv7
+# set carries (the haos-version JSON has ONE version per plugin for all arches,
+# and the Supervisor pulls <image>:<that version>). Where our armv7 version is a
+# GA bump (.1/.2) with no upstream aarch64 twin, it aliases the nearest upstream
+# aarch64 tag below it.
+
+on:
+  push:
+    branches:
+      - "ga/aarch64-2025.11.5.10"
+  workflow_dispatch: ~
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: Mirror ${{ matrix.slug }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { slug: dns,       up_tag: "2026.09.0", digest: "sha256:9507ace6b8a1671225b9279b7d61e83496d966dd50ff75a6acbe6f545a901aab", alias: "2026.09.1" }
+          - { slug: audio,     up_tag: "2025.08.0", digest: "sha256:6738b10ac9011d46e97f283b154c8d616fd6bbf1bf382c1eb41acdc2f18854ec", alias: "2025.08.1" }
+          - { slug: cli,       up_tag: "2025.10.0", digest: "sha256:ac27573c71e02c5ec25db2799a3e485230bd6c077a6539d924cfa6578e941fbb", alias: "2025.10.2" }
+          - { slug: multicast, up_tag: "2025.08.0", digest: "sha256:a412977f1382cfe6dd053c0e1c6744da4c36762a5c8e580ece777887bdfef30a", alias: "2025.08.1" }
+          - { slug: observer,  up_tag: "2025.02.0", digest: "sha256:fe4f0ad0515541bd4acccbde25f2c55c4e532be6634aa6f7eca59d4cea9bce2c", alias: "2025.02.1" }
+    env:
+      SRC: ghcr.io/home-assistant/aarch64-hassio-${{ matrix.slug }}
+      DST: ghcr.io/greenautarky/aarch64-hassio-${{ matrix.slug }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Source digest still matches the pin
+        run: |
+          set -euo pipefail
+          got=$(docker buildx imagetools inspect "${SRC}:${{ matrix.up_tag }}" --format '{{.Manifest.Digest}}')
+          echo "upstream ${SRC}:${{ matrix.up_tag }} = $got"
+          [ "$got" = "${{ matrix.digest }}" ] || { echo "::error::upstream tag moved: $got != ${{ matrix.digest }}"; exit 1; }
+
+      - name: CVE scan of the pinned source (coverage rule; exit 1 = findings, reported)
+        run: |
+          set -uo pipefail
+          docker pull --platform linux/arm64 "${SRC}@${{ matrix.digest }}"
+          scripts/cve-gate.sh "${SRC}@${{ matrix.digest }}"; rc=$?
+          echo "cve-gate rc=$rc (0 clean, 1 fixable findings in upstream content, 2 broken scan)"
+          [ "$rc" -ne 2 ] || exit 2
+          echo "- ${{ matrix.slug }}: cve-gate rc=$rc" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mirror by digest and assert identity
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "${DST}:${{ matrix.up_tag }}" -t "${DST}:${{ matrix.alias }}" \
+            "${SRC}@${{ matrix.digest }}"
+          for t in ${{ matrix.up_tag }} ${{ matrix.alias }}; do
+            got=$(docker buildx imagetools inspect "${DST}:$t" --format '{{.Manifest.Digest}}')
+            [ "$got" = "${{ matrix.digest }}" ] || { echo "::error::mirror digest $got != pin"; exit 1; }
+            echo "- ${{ matrix.slug }}: ${DST}:$t = $got" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
