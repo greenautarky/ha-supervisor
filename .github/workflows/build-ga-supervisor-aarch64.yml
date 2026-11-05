@@ -1,0 +1,103 @@
+name: Build greenautarky Supervisor image (aarch64, 2025.11.5 line)
+
+# Odoo #1485 / epic #1488 / WP9.1 (#1489). aarch64 twin of build-ga-supervisor.yml:
+# same fork source (upstream + the GA patches), same base as build.yaml declares,
+# same CVE gate, native arm runner (never QEMU).
+#
+# Publishes ghcr.io/greenautarky/aarch64-hassio-supervisor:<const.py version>
+# and :ci-<sha>. Never writes :latest and never touches a channel or device.
+
+on:
+  push:
+    branches:
+      - "ga/aarch64-2025.11.5.10"
+  workflow_dispatch: ~
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and push aarch64 Supervisor
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/greenautarky/aarch64-hassio-supervisor
+      COSIGN_VERSION: "2.6.0"
+      # Dockerfile pins the armv7 tempio checksum; this is tempio_aarch64 2026.07.0
+      # (sha256 measured 2026-11-05 from the upstream release asset).
+      TEMPIO_SHA256_AARCH64: dd846861a6829bdf1267b09d4735fc6ebd0cc748c73542eb9e721c9c4d833209
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version and base (declared in build.yaml, not a literal here)
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m1 'SUPERVISOR_VERSION = ' supervisor/const.py | sed 's/.*"\(.*\)".*/\1/')
+          BASE=$(sed -n 's/^  aarch64: //p' build.yaml)
+          [ -n "$VERSION" ] && [ -n "$BASE" ] || { echo "::error::version or base not found"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "ci_tag=ci-$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION base=$BASE"
+
+      - name: Build (load, no push yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          platforms: linux/arm64
+          build-args: |
+            BUILD_FROM=${{ steps.meta.outputs.base }}
+            BUILD_ARCH=aarch64
+            COSIGN_VERSION=${{ env.COSIGN_VERSION }}
+            TEMPIO_SHA256=${{ env.TEMPIO_SHA256_AARCH64 }}
+          labels: |
+            io.hass.type=supervisor
+            io.hass.arch=aarch64
+            io.hass.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.title=Home Assistant Supervisor (GA fork)
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/greenautarky/ha-supervisor
+            org.greenautarky.staging-tag=${{ steps.meta.outputs.ci_tag }}
+          tags: local/aarch64-hassio-supervisor:scan
+
+      - name: Smoke - the app imports and reports the expected version and arch
+        run: |
+          docker run --rm --entrypoint python3 local/aarch64-hassio-supervisor:scan -c "
+          import platform, supervisor.const as c, aiohttp, brotli, certifi
+          print(platform.machine(), c.SUPERVISOR_VERSION)
+          assert platform.machine() == 'aarch64', platform.machine()
+          assert c.SUPERVISOR_VERSION == '${{ steps.meta.outputs.version }}'
+          "
+
+      - name: CVE GATE - distro packages (blocks the push; exit 2 = broken scan)
+        run: scripts/cve-gate.sh local/aarch64-hassio-supervisor:scan
+
+      - name: CVE report - bundled libraries (visibility, non-gating)
+        if: always()
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image --scanners vuln --pkg-types library \
+            --severity HIGH,CRITICAL --exit-code 0 --no-progress \
+            local/aarch64-hassio-supervisor:scan
+
+      - name: Push
+        run: |
+          set -euo pipefail
+          for t in "${IMAGE}:${{ steps.meta.outputs.version }}" "${IMAGE}:${{ steps.meta.outputs.ci_tag }}"; do
+            docker tag local/aarch64-hassio-supervisor:scan "$t"
+            docker push "$t"
+          done
+          docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${{ steps.meta.outputs.version }}" | tee -a "$GITHUB_STEP_SUMMARY"
