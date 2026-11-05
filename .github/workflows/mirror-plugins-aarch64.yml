@@ -38,7 +38,8 @@ jobs:
           - { slug: audio,     up_tag: "2025.08.0", digest: "sha256:6738b10ac9011d46e97f283b154c8d616fd6bbf1bf382c1eb41acdc2f18854ec", alias: "2025.08.1" }
           - { slug: cli,       up_tag: "2025.10.0", digest: "sha256:ac27573c71e02c5ec25db2799a3e485230bd6c077a6539d924cfa6578e941fbb", alias: "2025.10.2" }
           - { slug: multicast, up_tag: "2025.08.0", digest: "sha256:a412977f1382cfe6dd053c0e1c6744da4c36762a5c8e580ece777887bdfef30a", alias: "2025.08.1" }
-          - { slug: observer,  up_tag: "2025.02.0", digest: "sha256:fe4f0ad0515541bd4acccbde25f2c55c4e532be6634aa6f7eca59d4cea9bce2c", alias: "2025.02.1" }
+          - { slug: supervisor, up_tag: "2025.11.5", digest: "sha256:e0080cb7426f3ed776104942f50c40831e7e0e5e869e7bd70d587fb9dc83f979", alias: "2025.11.5" }
+          # observer: image has no OS package DB -> cve-gate exit 2 (0 packages); held for a decision
     env:
       SRC: ghcr.io/home-assistant/aarch64-hassio-${{ matrix.slug }}
       DST: ghcr.io/greenautarky/aarch64-hassio-${{ matrix.slug }}
@@ -75,6 +76,10 @@ jobs:
             "${SRC}@${{ matrix.digest }}"
           for t in ${{ matrix.up_tag }} ${{ matrix.alias }}; do
             got=$(docker buildx imagetools inspect "${DST}:$t" --format '{{.Manifest.Digest}}')
-            [ "$got" = "${{ matrix.digest }}" ] || { echo "::error::mirror digest $got != pin"; exit 1; }
+            # a single-manifest source is wrapped into an index by imagetools: then the pin is the child manifest
+            if [ "$got" != "${{ matrix.digest }}" ]; then
+              docker buildx imagetools inspect --raw "${DST}:$t" | grep -q "${{ matrix.digest }}" \
+                || { echo "::error::mirror $got does not contain pin"; exit 1; }
+            fi
             echo "- ${{ matrix.slug }}: ${DST}:$t = $got" | tee -a "$GITHUB_STEP_SUMMARY"
           done
