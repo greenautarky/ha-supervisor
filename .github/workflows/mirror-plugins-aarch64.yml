@@ -39,7 +39,8 @@ jobs:
           - { slug: cli,       up_tag: "2025.10.0", digest: "sha256:ac27573c71e02c5ec25db2799a3e485230bd6c077a6539d924cfa6578e941fbb", alias: "2025.10.2" }
           - { slug: multicast, up_tag: "2025.08.0", digest: "sha256:a412977f1382cfe6dd053c0e1c6744da4c36762a5c8e580ece777887bdfef30a", alias: "2025.08.1" }
           - { slug: supervisor, up_tag: "2025.11.5", digest: "sha256:e0080cb7426f3ed776104942f50c40831e7e0e5e869e7bd70d587fb9dc83f979", alias: "2025.11.5" }
-          # observer: image has no OS package DB -> cve-gate exit 2 (0 packages); held for a decision
+          # observer: no OS package DB (Go binary on minimal base) -> scan=binary (gobinary modules, fail closed on 0)
+          - { slug: observer,  up_tag: "2025.02.0", digest: "sha256:fe4f0ad0515541bd4acccbde25f2c55c4e532be6634aa6f7eca59d4cea9bce2c", alias: "2025.02.1", scan: binary }
     env:
       SRC: ghcr.io/home-assistant/aarch64-hassio-${{ matrix.slug }}
       DST: ghcr.io/greenautarky/aarch64-hassio-${{ matrix.slug }}
@@ -63,7 +64,11 @@ jobs:
         run: |
           set +e; set -uo pipefail
           docker pull --platform linux/arm64 "${SRC}@${{ matrix.digest }}"
-          scripts/cve-gate.sh "${SRC}@${{ matrix.digest }}"; rc=$?
+          if [ "${{ matrix.scan }}" = "binary" ]; then
+            scripts/cve-gate-binary.sh "${SRC}@${{ matrix.digest }}"; rc=$?
+          else
+            scripts/cve-gate.sh "${SRC}@${{ matrix.digest }}"; rc=$?
+          fi
           echo "cve-gate rc=$rc (0 clean, 1 fixable findings in upstream content, 2 broken scan)"
           [ "$rc" -ne 2 ] || exit 2
           echo "- ${{ matrix.slug }}: cve-gate rc=$rc" >> "$GITHUB_STEP_SUMMARY"
