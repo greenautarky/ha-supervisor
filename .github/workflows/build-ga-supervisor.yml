@@ -25,10 +25,11 @@ on:
   push:
     branches:
       - "ga/2026.10.5-wp9-1"
+      - "ga/2026.10.5-wp9-3"
   workflow_dispatch: ~
 
 env:
-  GA_DEV_VERSION: "2026.10.5.1"
+  GA_DEV_VERSION: "2026.10.5.2"
   GATE_MODE: block
 
 permissions:
@@ -125,6 +126,15 @@ jobs:
           print('brotli', brotli.__version__, 'certifi', certifi.__version__, 'cryptography', cryptography.__version__)
           assert c.SUPERVISOR_VERSION == '${{ env.GA_DEV_VERSION }}', c.SUPERVISOR_VERSION
           "
+
+      # Layout + START tests (2026.10.5.1 shipped green and exited 7 s after
+      # start: the add-on base's boot oneshots ran inside a Supervisor image).
+      # Both run BEFORE the push, so a broken image never gets a tag.
+      - name: Layout - the image is a Supervisor, not an add-on base
+        run: scripts/image-layout-check.sh local/${{ matrix.arch }}-hassio-supervisor:scan ${{ matrix.platform }}
+
+      - name: START - container stays up 60 s and the API port answers
+        run: HOLD=60 scripts/start-test.sh local/${{ matrix.arch }}-hassio-supervisor:scan ${{ matrix.platform }}
 
       - name: CVE GATE - distro packages (fixable HIGH/CRITICAL)
         id: gate

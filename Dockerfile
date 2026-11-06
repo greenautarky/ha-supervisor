@@ -62,6 +62,22 @@ RUN \
     \
     && pip3 install uv==0.13.5
 
+# GA fork: the armv7 BUILD_FROM is the GA add-on base, whose s6-overlay carries
+# the ADD-ON boot oneshots base-addon-banner and base-addon-log-level. They
+# query the Supervisor API for the add-on's own config; inside the Supervisor
+# image there is no such API yet (this container IS the API), so they fail
+# ("Unknown log_level") and s6 stops the container. Upstream base-python has no
+# such services (aarch64 is unaffected, the loop below finds nothing). Remove
+# them and every reference, so s6-rc compiles a valid, add-on-free tree.
+# Guarded by scripts/image-layout-check.sh in CI.
+RUN \
+    S6=/package/admin/s6-overlay/etc/s6-rc/sources \
+    && for svc in base-addon-banner base-addon-log-level; do \
+        rm -rf "${S6}/${svc}" "/package/admin/s6-overlay/etc/s6-rc/scripts/${svc}"; \
+        find "${S6}" -name "${svc}" -exec rm -rf {} +; \
+    done \
+    && ! grep -rl base-addon "${S6}" /package/admin/s6-overlay/etc/s6-rc/scripts
+
 #############################################
 # Install requirements and build Supervisor #
 #############################################
