@@ -193,7 +193,12 @@ SCHEMA_UPDATER_CONFIG = vol.Schema(
             extra=vol.REMOVE_EXTRA,
         ),
         vol.Optional(ATTR_OTA): vol.Url(),
-        vol.Optional(ATTR_AUTO_UPDATE, default=True): bool,
+        # GA patch: default OFF. A fresh device keeps the Supervisor it was baked
+        # with instead of self-updating to the channel version on first boot
+        # (rc2 pulled a broken 2026.10.5.1 that way). A persisted value, true or
+        # false, is never rewritten: the default only fills a MISSING key, so
+        # existing devices keep their setting.
+        vol.Optional(ATTR_AUTO_UPDATE, default=False): bool,
     },
     extra=vol.REMOVE_EXTRA,
 )
