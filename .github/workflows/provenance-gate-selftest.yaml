@@ -1,0 +1,33 @@
+name: Provenance gate self-test
+
+# Runs the provenance gate over committed fixtures (must_fail + must_pass).
+# This workflow builds nothing and pushes nothing.
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+    paths:
+      - 'scripts/provenance-check.sh'
+      - 'tests/gates/provenance/**'
+      - '.github/workflows/provenance-gate-selftest.yaml'
+      - '.github/workflows/build-ga-supervisor.yml'
+  push:
+    branches: ["ga/**"]
+    paths:
+      - 'scripts/provenance-check.sh'
+      - 'tests/gates/provenance/**'
+      - '.github/workflows/provenance-gate-selftest.yaml'
+      - '.github/workflows/build-ga-supervisor.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provenance gate fixtures (must_fail + must_pass)
+        run: tests/gates/provenance/run-fixtures.sh

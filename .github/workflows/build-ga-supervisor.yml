@@ -1,4 +1,4 @@
-name: Build greenautarky Supervisor image (2026.10 line, DEV/test only)
+name: Build greenautarky Supervisor image (2026.10 line)
 
 # WP9.1 (Odoo #1489, epic #1488). Builds the GA Supervisor fork for armv7 AND
 # aarch64 and pushes DEV/STAGING tags only:
@@ -15,18 +15,35 @@ name: Build greenautarky Supervisor image (2026.10 line, DEV/test only)
 # infrastructure (wheel index credentials, cosign identities). The fork builds
 # with plain buildx.
 #
-# GATE ORDER: build (loaded, not pushed) -> smoke import -> CVE gate -> push.
-# GATE_MODE=report (set below) pushes the DEV tag even when the gate finds
-# fixable HIGH/CRITICAL and then fails the job, so a red run still leaves a
-# scannable test image. That is only acceptable because the tags are DEV tags;
-# a release workflow must block before the push.
+# GATE ORDER: build (loaded, not pushed) -> smoke import -> layout -> START ->
+# provenance gate -> CVE gate -> push.
+# GATE_MODE=block (set below, intended): a red CVE gate stops the job BEFORE the
+# push, so no tag is written for an image that failed. GATE_MODE=report would
+# push the tag anyway and fail the job afterwards (scannable test image); use it
+# only for a throwaway DEV run, never for a build whose version tag a device pulls.
+#
+# PROVENANCE: every image is stamped with org.opencontainers.image.revision =
+# the commit built (github.sha, on every arch), .source, .created, the resolved
+# base digest (org.greenautarky.base-digest) and org.greenautarky.build-mode.
+# build-mode is DEV for push builds and for workflow_dispatch with build_mode=DEV
+# (default), RELEASE only for a dispatch with build_mode=RELEASE.
+# scripts/provenance-check.sh fails the job before the push if the labels do not
+# match; fixtures: tests/gates/provenance (run by provenance-gate-selftest).
 
 on:
   push:
     branches:
       - "ga/2026.10.5-wp9-1"
       - "ga/2026.10.5-wp9-3"
-  workflow_dispatch: ~
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: "Provenance build-mode label (DEV = test build, RELEASE = build of a version a device will pull)"
+        type: choice
+        options:
+          - DEV
+          - RELEASE
+        default: DEV
 
 env:
   GA_DEV_VERSION: "2026.10.5.3"
@@ -83,10 +100,21 @@ jobs:
 
       - name: Determine tags
         id: meta
+        env:
+          BUILD_MODE_INPUT: ${{ inputs.build_mode }}
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           echo "ci_tag=ci-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "dev_tag=${GA_DEV_VERSION}" >> "$GITHUB_OUTPUT"
+          # build-mode: only an explicit dispatch input can say RELEASE; push builds are DEV.
+          MODE="${BUILD_MODE_INPUT:-DEV}"
+          case "$MODE" in DEV|RELEASE) ;; *) echo "::error::bad build_mode '$MODE'"; exit 1 ;; esac
+          echo "build_mode=${MODE}" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # Resolve the base image digest ONCE; the build uses it and the label records it.
+          BASE_DIGEST=$(docker buildx imagetools inspect "${{ matrix.build_from }}" --format '{{.Manifest.Digest}}')
+          [[ "$BASE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::cannot resolve base digest for ${{ matrix.build_from }}"; exit 1; }
+          echo "base_digest=${BASE_DIGEST}" >> "$GITHUB_OUTPUT"
           # The Dockerfile `bind` mounts ./wheels; upstream CI fills it, here it is empty.
           mkdir -p wheels
 
@@ -98,7 +126,7 @@ jobs:
           push: false
           platforms: ${{ matrix.platform }}
           build-args: |
-            BUILD_FROM=${{ matrix.build_from }}
+            BUILD_FROM=${{ matrix.build_from }}@${{ steps.meta.outputs.base_digest }}
             BUILD_VERSION=${{ env.GA_DEV_VERSION }}
             GA_INSTALL_PYTHON=${{ matrix.install_python }}
             GA_WHEELS_STAGE=${{ matrix.wheels_stage }}
@@ -108,8 +136,11 @@ jobs:
             io.hass.version=${{ env.GA_DEV_VERSION }}
             org.opencontainers.image.title=Home Assistant Supervisor (GA fork)
             org.opencontainers.image.version=${{ env.GA_DEV_VERSION }}
-            org.opencontainers.image.source=https://github.com/greenautarky/ha-supervisor
-            org.greenautarky.build-mode=DEV
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.greenautarky.base-digest=${{ steps.meta.outputs.base_digest }}
+            org.greenautarky.build-mode=${{ steps.meta.outputs.build_mode }}
             org.greenautarky.staging-tag=${{ steps.meta.outputs.ci_tag }}
           tags: local/${{ matrix.arch }}-hassio-supervisor:scan
 
@@ -135,6 +166,18 @@ jobs:
 
       - name: START - container stays up 60 s and the API port answers
         run: HOLD=60 scripts/start-test.sh local/${{ matrix.arch }}-hassio-supervisor:scan ${{ matrix.platform }}
+
+      # Provenance: revision == this commit on every arch, build-mode == expected.
+      # Runs BEFORE the push (the 2026.10.5.3 images shipped with no/inherited
+      # revision). The expectations come from github.sha / the dispatch input
+      # directly, not from the step outputs that fed the labels.
+      - name: Provenance GATE - labels tie the image to this commit
+        run: |
+          scripts/provenance-check.sh \
+            --expect-revision "${{ github.sha }}" \
+            --expect-mode "${{ inputs.build_mode || 'DEV' }}" \
+            --expect-source "${{ github.server_url }}/${{ github.repository }}" \
+            --image local/${{ matrix.arch }}-hassio-supervisor:scan
 
       - name: CVE GATE - distro packages (fixable HIGH/CRITICAL)
         id: gate
