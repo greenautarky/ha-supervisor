@@ -1,0 +1,21 @@
+--- a/buildroot-external/package/hassio/check-supervisor-image.sh	2026-11-07 21:46:23.309296212 +0100
++++ b/buildroot-external/package/hassio/check-supervisor-image.sh	2026-11-07 21:46:23.321296382 +0100
+@@ -50,5 +50,18 @@
+ [ "$(lbl io.hass.version)" = "$pin" ]    || err "${img}:${tag} label io.hass.version='$(lbl io.hass.version)' (want '$pin')"
+ [ "$(lbl io.hass.type)" = "supervisor" ] || err "${img}:${tag} label io.hass.type='$(lbl io.hass.type)' (want 'supervisor')"
+ [ "$(lbl io.hass.arch)" = "$arch" ]      || err "${img}:${tag} label io.hass.arch='$(lbl io.hass.arch)' (want '$arch')"
++# 4. provenance: org.opencontainers.image.revision must be a full commit sha.
++#    The shipped 2026.10.5.3 images have none (aarch64) or the base image's
++#    commit (armv7), so this is a WARNING until the first Supervisor built by
++#    the stamping workflow (ha-supervisor, Odoo #1658) is pinned; set
++#    SUPERVISOR_REQUIRE_REVISION=1 (hassio.mk, from that bump on) to enforce.
++rev="$(lbl org.opencontainers.image.revision)"
++if ! [[ "$rev" =~ ^[0-9a-f]{40}$ ]]; then
++  if [ "${SUPERVISOR_REQUIRE_REVISION:-0}" = "1" ]; then
++    err "${img}:${tag} label org.opencontainers.image.revision='${rev}' (want a 40-hex commit sha)"
++  else
++    echo "WARNING: supervisor image: ${img}:${tag} has no usable org.opencontainers.image.revision ('${rev}'); not enforced yet"
++  fi
++fi
+ [ "$fail" -eq 0 ] || exit 1
+ echo "supervisor image ok: ${img}:${tag} (labels match the pin)"

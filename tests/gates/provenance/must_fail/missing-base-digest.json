@@ -1,0 +1,13 @@
+{
+  "expect": {
+    "revision": "0123456789abcdef0123456789abcdef01234567",
+    "mode": "DEV"
+  },
+  "labels": {
+    "org.opencontainers.image.revision": "0123456789abcdef0123456789abcdef01234567",
+    "org.greenautarky.build-mode": "DEV",
+    "org.opencontainers.image.created": "2026-11-07T10:00:00Z",
+    "org.opencontainers.image.source": "https://github.com/greenautarky/ha-supervisor",
+    "io.hass.type": "supervisor"
+  }
+}
