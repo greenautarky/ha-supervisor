@@ -640,7 +640,7 @@ class DockerInterface(JobGroup, ABC):
                 ) from err
 
             image_arch = f"{image['Os']}/{image['Architecture']}"
-            if "Variant" in image:
+            if image.get("Variant"):
                 image_arch = f"{image_arch}/{image['Variant']}"
 
             # If we have an image and its the right arch, all set
@@ -648,6 +648,14 @@ class DockerInterface(JobGroup, ABC):
             # Make sure we match linux/arm64 and linux/arm64/v8.
             expected_image_arch = MAP_ARCH[arch]
             if image_arch.startswith(expected_image_arch):
+                return
+            # GA fork (#1637): an image whose config carries no variant is
+            # "linux/arm". Docker and containerd normalise that to v7 (the
+            # default arm variant), so it IS the armv7 image. A baked Core
+            # lost its variant in the image import (registry copy has v7);
+            # treating it as a mismatch removed the baked image on the first
+            # boot and the pull needs the network the first boot may not have.
+            if arch == CpuArch.ARMV7 and image_arch == "linux/arm":
                 return
             _LOGGER.info(
                 "Image %s has arch %s, expected %s. Reinstalling.",
