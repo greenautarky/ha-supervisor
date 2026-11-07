@@ -14,6 +14,7 @@ from dbus_fast import DBusError
 import pytest
 from time_machine import travel
 
+from supervisor.arch import CpuArchManager
 from supervisor.const import CpuArch
 from supervisor.coresys import CoreSys
 from supervisor.dbus.const import DBUS_ERR_SYSTEMD_NO_SUCH_UNIT
@@ -1241,6 +1242,72 @@ async def test_core_loads_wrong_image_for_architecture(
     assert (
         coresys.homeassistant.image == "ghcr.io/home-assistant/qemux86-64-homeassistant"
     )
+
+
+@pytest.mark.parametrize("variant", [None, ""])
+async def test_core_armv7_image_without_variant_is_kept(
+    coresys: CoreSys, container: DockerContainer, variant: str | None
+):
+    """A linux/arm Core image without variant is the armv7 image (#1637).
+
+    The baked Core of BOSv1.6.0-rc4 had lost "variant": "v7" in its config.
+    The arch check treated "linux/arm" as a mismatch, removed the baked image
+    and needed the network to pull it again.
+    """
+    coresys.homeassistant.set_image("ghcr.io/greenautarky/home-assistant-armv7")
+    coresys.homeassistant.version = AwesomeVersion("2026.10.4.4")
+    img_data = coresys.docker.images.inspect.return_value | {
+        "Architecture": "arm",
+        "Config": {"Labels": {"io.hass.version": "2026.10.4.4"}},
+    }
+    if variant is not None:
+        img_data["Variant"] = variant
+    coresys.docker.images.inspect.return_value = img_data
+    container.show.return_value |= img_data
+
+    with (
+        patch.object(CpuArchManager, "supervisor", new=CpuArch.ARMV7),
+        patch.object(DockerAPI, "pull_image") as pull_image,
+        patch.object(
+            HomeAssistant,
+            "default_image",
+            new="ghcr.io/greenautarky/home-assistant-armv7",
+        ),
+    ):
+        await coresys.homeassistant.core.load()
+
+    pull_image.assert_not_called()
+    coresys.docker.images.delete.assert_not_called()
+    assert coresys.homeassistant.version == AwesomeVersion("2026.10.4.4")
+
+
+async def test_core_armv7_wrong_arch_still_reinstalled(
+    coresys: CoreSys, container: DockerContainer
+):
+    """The variant tolerance does not hide a real mismatch (#1637)."""
+    coresys.homeassistant.set_image("ghcr.io/greenautarky/home-assistant-armv7")
+    coresys.homeassistant.version = AwesomeVersion("2026.10.4.4")
+    img_data = coresys.docker.images.inspect.return_value | {
+        "Architecture": "arm64",
+        "Config": {"Labels": {"io.hass.version": "2026.10.4.4"}},
+    }
+    coresys.docker.images.inspect.return_value = img_data
+    container.show.return_value |= img_data
+
+    with (
+        patch.object(CpuArchManager, "supervisor", new=CpuArch.ARMV7),
+        patch.object(
+            DockerAPI, "pull_image", return_value=img_data | {"Architecture": "arm"}
+        ) as pull_image,
+        patch.object(
+            HomeAssistant,
+            "default_image",
+            new="ghcr.io/greenautarky/home-assistant-armv7",
+        ),
+    ):
+        await coresys.homeassistant.core.load()
+
+    pull_image.assert_called_once()
 
 
 def _lose_core_image(coresys: CoreSys) -> None:
