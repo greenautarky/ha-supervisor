@@ -214,14 +214,20 @@ class PluginBase(ABC, FileConfiguration, CoreSysAttributes):
     async def install(self) -> None:
         """Install system plugin, retrying until it succeeds."""
         _LOGGER.info("Setup %s plugin", self.slug)
+        delay = 5
         while True:
             try:
                 await self._install()
             except PluginError:
                 _LOGGER.warning(
-                    "Error on installing %s plugin, retrying in 30sec", self.slug
+                    "Error on installing %s plugin, retrying in %dsec",
+                    self.slug,
+                    delay,
                 )
-                await asyncio.sleep(30)
+                await asyncio.sleep(delay)
+                # Bounded backoff: quick early retries (a boot race heals in
+                # seconds), capped at the former fixed 30 s.
+                delay = min(delay * 2, 30)
             else:
                 break
 

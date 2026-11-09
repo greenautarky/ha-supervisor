@@ -76,6 +76,16 @@ class Updater(FileConfiguration, CoreSysAttributes):
     async def reload(self) -> None:
         """Update internal data."""
         if not self.sys_supervisor.connectivity:
+            # GA fork: never trust a stale False. The cached state is only
+            # refreshed by a probe, and nothing probes on behalf of a caller
+            # that is merely waiting on version data (the plugin install loop
+            # at boot). A first fetch that raced the network coming up would
+            # otherwise leave connectivity False forever. The probe is cheap
+            # and rate limited (5 s min interval while disconnected), so this
+            # bounds the re-check rate of any retry loop calling reload().
+            await self.sys_supervisor.check_and_update_connectivity()
+
+        if not self.sys_supervisor.connectivity:
             # If there's no connectivity, delay version fetch until it's back
             if not self._connectivity_listener:
                 _LOGGER.debug("No Supervisor connectivity, delaying version fetch")
