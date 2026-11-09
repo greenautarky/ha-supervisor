@@ -796,3 +796,21 @@ async def test_plugin_watchdog_stops_when_disabled(plugin: PluginBase) -> None:
         await plugin._restart_after_problem(ContainerState.FAILED, 1)  # pylint: disable=protected-access
 
     rebuild.assert_not_called()
+
+
+@pytest.mark.parametrize("plugin", [PluginCli], indirect=True)
+async def test_plugin_install_retry_backoff_is_bounded(plugin: PluginBase) -> None:
+    """The boot install loop backs off 5, 10, 20, 30, 30 s and then succeeds."""
+    attempts = [PluginError("x")] * 5 + [None]
+    sleeps: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    with (
+        patch.object(PluginBase, "_install", side_effect=attempts),
+        patch("supervisor.plugins.base.asyncio.sleep", new=_sleep),
+    ):
+        await plugin.install()
+
+    assert sleeps == [5, 10, 20, 30, 30]

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import aiohttp
 from awesomeversion import AwesomeVersion
 import pytest
 
@@ -189,7 +190,8 @@ async def test_delayed_fetch_for_connectivity(
     coresys.websession.get.return_value.__aenter__.return_value.read.return_value = (
         load_binary_fixture("version_stable.json")
     )
-    coresys.websession.head = AsyncMock()
+    # The network really is down: the re-check in reload() must not flip state
+    coresys.websession.head = AsyncMock(side_effect=aiohttp.ClientError("down"))
 
     # Start with no connectivity and confirm there is no version fetch on load
     coresys.supervisor._connectivity = False  # pylint: disable=protected-access
@@ -203,6 +205,7 @@ async def test_delayed_fetch_for_connectivity(
 
     # Now signal host has connectivity. This causes a series of async tasks to
     # eventually do a version fetch, wait for all of them to complete to assert
+    coresys.websession.head = AsyncMock()  # the network is really up now
     network_manager_service.emit_properties_changed(
         {"Connectivity": ConnectivityState.CONNECTIVITY_FULL}
     )
@@ -338,3 +341,53 @@ async def test_reload_skips_supervisor_update_during_startup(
         assert coresys.supervisor.need_update
         await coresys.block_till_done()
         update.assert_not_called()
+
+
+@pytest.mark.usefixtures("no_job_throttle")
+async def test_reload_rechecks_stale_false_connectivity(
+    coresys: CoreSys, websession: MagicMock
+):
+    """reload() must re-probe a cached False instead of trusting it forever.
+
+    First-boot deadlock: the first fetch raced the network coming up, the
+    cached state stayed False, and no host connectivity CHANGE event ever came
+    (the network was already up). The plugin install loop only calls reload().
+    """
+    coresys.websession.get = MagicMock()
+    coresys.websession.get.return_value.__aenter__.return_value.status = 200
+    coresys.websession.get.return_value.__aenter__.return_value.read.return_value = (
+        load_binary_fixture("version_stable.json")
+    )
+    # The network is up now, only the cached state is stale
+    coresys.websession.head = AsyncMock()
+    coresys.supervisor._connectivity = False  # pylint: disable=protected-access
+    coresys.supervisor._connectivity_last_check = (  # pylint: disable=protected-access
+        coresys.loop.time() - 60
+    )
+
+    await coresys.updater.reload()
+
+    coresys.websession.head.assert_called()
+    coresys.websession.get.assert_called_once()
+    assert coresys.supervisor.connectivity is True
+    assert coresys.updater.version_homeassistant is not None
+
+
+@pytest.mark.usefixtures("no_job_throttle")
+async def test_reload_recheck_is_rate_limited_while_offline(
+    coresys: CoreSys, websession: MagicMock
+):
+    """A retry loop hammering reload() while offline probes at most every 5 s."""
+    coresys.websession.get = MagicMock()
+    coresys.websession.head = AsyncMock(side_effect=aiohttp.ClientError("down"))
+    coresys.supervisor._connectivity = False  # pylint: disable=protected-access
+    coresys.supervisor._connectivity_last_check = (  # pylint: disable=protected-access
+        coresys.loop.time() - 60
+    )
+
+    for _ in range(5):
+        await coresys.updater.reload()
+
+    coresys.websession.get.assert_not_called()
+    # primary + fallback probe of ONE check, not five
+    assert coresys.websession.head.call_count == 2
