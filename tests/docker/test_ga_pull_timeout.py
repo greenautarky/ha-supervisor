@@ -26,9 +26,16 @@ def _pull_stream(events: int, delay: float):
 
 
 def test_pull_timeouts_are_real_numbers():
-    """Production values: 90 s stall, 30 min total (pinned literals)."""
-    assert docker_manager.PULL_STALL_TIMEOUT == 90
+    """Production values: 300 s stall, 30 min total (pinned literals).
+
+    300 s, not 90: a baked add-on image is unpacked by the daemon during the
+    pull without emitting progress events (~25 s + 0.25 s/MB compressed on the
+    iHost; ga_hmvapp aborted at 90 s on BOSv1.6.0-rc13, Odoo #2065). The total
+    cap stays the hard upper bound, and the stall window must stay below it.
+    """
+    assert docker_manager.PULL_STALL_TIMEOUT == 300
     assert docker_manager.PULL_TOTAL_TIMEOUT == 1800
+    assert docker_manager.PULL_STALL_TIMEOUT < docker_manager.PULL_TOTAL_TIMEOUT
 
 
 async def test_stalled_pull_raises(coresys: CoreSys):

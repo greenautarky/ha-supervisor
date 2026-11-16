@@ -73,7 +73,11 @@ MIN_SUPPORTED_DOCKER: Final = AwesomeVersion("24.0.0")
 # GA fork: pull timeouts. A registry stall on a flaky 4G/LTE link left Core
 # down indefinitely while a Supervisor self-update waited forever for the pull
 # to make progress (iHost fleet, 2026-05-04).
-PULL_STALL_TIMEOUT: Final = 90  # max seconds without a progress event
+# 300 s (was 90): a baked image is unpacked by the daemon during the pull with
+# no progress events (~25 s + 0.25 s/MB compressed on the iHost); 90 s aborted
+# the ga_hmvapp install on BOSv1.6.0-rc13 (Odoo #2065). PULL_TOTAL_TIMEOUT stays
+# the hard upper bound.
+PULL_STALL_TIMEOUT: Final = 300  # max seconds without a progress event
 PULL_TOTAL_TIMEOUT: Final = 1800  # absolute cap for one pull (30 min)
 DOCKER_NETWORK_HOST: Final = "host"
 RE_IMPORT_IMAGE_STREAM = re.compile(r"(^Loaded image ID: |^Loaded image: )(.+)$")
