@@ -73,7 +73,7 @@ RUN \
 RUN \
     S6=/package/admin/s6-overlay/etc/s6-rc/sources \
     && for svc in base-addon-banner base-addon-log-level; do \
-        rm -rf "${S6}/${svc}" "/package/admin/s6-overlay/etc/s6-rc/scripts/${svc}"; \
+        rm -rf "${S6:?}/${svc}" "/package/admin/s6-overlay/etc/s6-rc/scripts/${svc}"; \
         find "${S6}" -name "${svc}" -exec rm -rf {} +; \
     done \
     && ! grep -rl base-addon "${S6}" /package/admin/s6-overlay/etc/s6-rc/scripts
