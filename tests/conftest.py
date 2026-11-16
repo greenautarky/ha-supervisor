@@ -618,6 +618,14 @@ async def coresys(
     ):
         coresys_obj = await initialize_coresys()
 
+    # GA fork decision (Odoo #1615): the Supervisor default for auto_update is
+    # False on a fresh state (supervisor/validate.py). Upstream tests are written
+    # for the upstream default (True) and exercise the auto-update paths, so the
+    # fixture pins True here. The GA default itself is asserted in
+    # tests/test_ga_auto_update_default.py; tests of the OFF behaviour set it
+    # explicitly.
+    coresys_obj.updater.auto_update = True
+
     # Mock save json
     coresys_obj._ingress.save_data = AsyncMock()
     coresys_obj._auth.save_data = AsyncMock()
