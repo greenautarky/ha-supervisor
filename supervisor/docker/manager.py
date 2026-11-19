@@ -75,10 +75,17 @@ MIN_SUPPORTED_DOCKER: Final = AwesomeVersion("24.0.0")
 # to make progress (iHost fleet, 2026-05-04).
 # 300 s (was 90): a baked image is unpacked by the daemon during the pull with
 # no progress events (~25 s + 0.25 s/MB compressed on the iHost); 90 s aborted
-# the ga_hmvapp install on BOSv1.6.0-rc13 (Odoo #2065). PULL_TOTAL_TIMEOUT stays
-# the hard upper bound.
+# the ga_hmvapp install on BOSv1.6.0-rc13 (Odoo #2065).
+# The total cap is SIZE-AWARE (Odoo #2136): a fixed 30 min failed every Core
+# pull (389-889 MB) on links below ~4-6 Mbit/s while the pull was progressing
+# fine. The budget is max(PULL_TOTAL_TIMEOUT, bytes / PULL_MIN_RATE), where
+# bytes is the sum of the layer sizes the daemon has announced so far, capped
+# at PULL_TOTAL_TIMEOUT_MAX. A dead link is still caught by the rolling stall
+# timeout; the total cap only bounds a pull slower than PULL_MIN_RATE.
 PULL_STALL_TIMEOUT: Final = 300  # max seconds without a progress event
-PULL_TOTAL_TIMEOUT: Final = 1800  # absolute cap for one pull (30 min)
+PULL_TOTAL_TIMEOUT: Final = 1800  # minimum total budget for one pull (30 min)
+PULL_MIN_RATE: Final = 16 * 1024  # bytes/s the budget assumes at worst
+PULL_TOTAL_TIMEOUT_MAX: Final = 24 * 3600  # hard cap whatever the size
 DOCKER_NETWORK_HOST: Final = "host"
 RE_IMPORT_IMAGE_STREAM = re.compile(r"(^Loaded image ID: |^Loaded image: )(.+)$")
 RE_PORT_CONFLICT_ERROR = re.compile(
@@ -273,6 +280,34 @@ class DockerConfig(FileConfiguration):
                 return hub_registry
 
         return None
+
+
+def pull_total_budget(known_bytes: int) -> float:
+    """Return the total time budget in seconds for a pull of known_bytes.
+
+    GA fork (Odoo #2136): never below PULL_TOTAL_TIMEOUT, grows with the size
+    at PULL_MIN_RATE, never above PULL_TOTAL_TIMEOUT_MAX.
+    """
+    by_size = known_bytes / PULL_MIN_RATE if known_bytes > 0 else 0
+    return min(max(PULL_TOTAL_TIMEOUT, by_size), PULL_TOTAL_TIMEOUT_MAX)
+
+
+def record_layer_size(layer_bytes: dict[str, int], event: dict[str, Any]) -> None:
+    """Remember the size a "Downloading" event announces for its layer.
+
+    Only "Downloading" carries the compressed layer size in progressDetail.total;
+    with the containerd snapshotter "Extracting" reports elapsed time there, so
+    it is ignored. Malformed entries are skipped, never fatal.
+    """
+    if event.get("status") != "Downloading":
+        return
+    layer = event.get("id")
+    detail = event.get("progressDetail")
+    if not layer or not isinstance(detail, dict):
+        return
+    total = detail.get("total")
+    if isinstance(total, int) and not isinstance(total, bool) and total > 0:
+        layer_bytes[layer] = total
 
 
 class DockerAPI(CoreSysAttributes):
@@ -767,23 +802,29 @@ class DockerAPI(CoreSysAttributes):
         """
         # The HTTP timeout is disabled for pulls, matching docker-py behavior.
         # GA fork: two timeouts of our own instead. PULL_STALL_TIMEOUT is
-        # rolling - every progress event moves the deadline; PULL_TOTAL_TIMEOUT
-        # caps a pull that trickles forever. Either raises DockerError, which
-        # the update paths already treat as a failed update, instead of
-        # blocking the job (and Core) indefinitely.
+        # rolling - every progress event moves the deadline. The total budget
+        # (pull_total_budget) caps a pull that trickles forever and grows with
+        # the announced image size. Either raises DockerError, which the update
+        # paths already treat as a failed update, instead of blocking the job
+        # (and Core) indefinitely.
         image_ref = f"{repository}:{tag}"
         loop = asyncio.get_running_loop()
         pull_started = loop.time()
+        layer_bytes: dict[str, int] = {}
         try:
             async with asyncio.timeout(PULL_STALL_TIMEOUT) as stall:
                 async for e in self.images.pull(
                     repository, tag=tag, platform=platform, auth=auth, stream=True
                 ):
                     stall.reschedule(loop.time() + PULL_STALL_TIMEOUT)
-                    if loop.time() - pull_started > PULL_TOTAL_TIMEOUT:
+                    record_layer_size(layer_bytes, e)
+                    known = sum(layer_bytes.values())
+                    budget = pull_total_budget(known)
+                    if loop.time() - pull_started > budget:
                         raise DockerError(
                             f"Pull of {image_ref} exceeded the total timeout of"
-                            f" {PULL_TOTAL_TIMEOUT}s",
+                            f" {budget:.0f}s ({known} bytes announced,"
+                            f" budget assumes >= {PULL_MIN_RATE} B/s)",
                             _LOGGER.error,
                         )
                     entry = PullLogEntry.from_pull_log_dict(job_id, e)
