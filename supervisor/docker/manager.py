@@ -292,7 +292,7 @@ def pull_total_budget(known_bytes: int) -> float:
     return min(max(PULL_TOTAL_TIMEOUT, by_size), PULL_TOTAL_TIMEOUT_MAX)
 
 
-def _record_layer_size(layer_bytes: dict[str, int], event: dict[str, Any]) -> None:
+def record_layer_size(layer_bytes: dict[str, int], event: dict[str, Any]) -> None:
     """Remember the size a "Downloading" event announces for its layer.
 
     Only "Downloading" carries the compressed layer size in progressDetail.total;
@@ -817,7 +817,7 @@ class DockerAPI(CoreSysAttributes):
                     repository, tag=tag, platform=platform, auth=auth, stream=True
                 ):
                     stall.reschedule(loop.time() + PULL_STALL_TIMEOUT)
-                    _record_layer_size(layer_bytes, e)
+                    record_layer_size(layer_bytes, e)
                     known = sum(layer_bytes.values())
                     budget = pull_total_budget(known)
                     if loop.time() - pull_started > budget:

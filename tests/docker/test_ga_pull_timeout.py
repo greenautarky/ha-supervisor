@@ -118,7 +118,7 @@ def test_layer_sizes_come_only_from_downloading_events():
         {"status": "Downloading", "id": "e", "progressDetail": "broken"},
         {"status": "Downloading", "progressDetail": {"total": 7}},
     ):
-        docker_manager._record_layer_size(sizes, event)  # noqa: SLF001
+        docker_manager.record_layer_size(sizes, event)
     assert sizes == {"a": 100, "b": 50}
 
 
