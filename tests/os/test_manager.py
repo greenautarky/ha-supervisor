@@ -18,6 +18,7 @@ from supervisor.exceptions import (
     HassOSUpdateError,
     HassOSUpdatePendingRebootError,
 )
+from supervisor.os import manager as os_manager
 from supervisor.resolution.const import (
     ContextType,
     IssueType,
@@ -198,13 +199,20 @@ async def test_update_download_failure_removes_partial_bundle(
     }
 
     response = MockResponse()
+    response.headers = {}  # no ETag / Content-Range from this store
+    response.content_length = None
     response.content = MagicMock()
     response.content.read = AsyncMock(side_effect=[b"partial", error])
     websession.get = MagicMock(return_value=response)
 
-    with pytest.raises(HassOSUpdateError, match="Can't (fetch OTA update|write OTA)"):
+    with (
+        patch.object(os_manager, "OTA_MAX_ATTEMPTS", 1),
+        patch.object(coresys.os, "_fetch_ota_sha256", return_value=None),
+        pytest.raises(HassOSUpdateError, match="Can't (fetch OTA update|write OTA)"),
+    ):
         await coresys.os.update()
 
+    # No (half) bundle is ever left where RAUC would take it from.
     assert not (coresys.config.path_tmp / "hassos-13.0.raucb").exists()
 
 
