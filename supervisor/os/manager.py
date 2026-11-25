@@ -1,10 +1,14 @@
 """OS support on supervisor."""
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
+import hashlib
 import logging
 from pathlib import Path, PurePath
+import re
+from typing import Final
 
 import aiohttp
 from awesomeversion import AwesomeVersion, AwesomeVersionException
@@ -32,6 +36,69 @@ from ..resolution.const import ContextType, IssueType, SuggestionType
 from .data_disk import DataDisk
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+# GA fork (Odoo #2136, SV-2): the OTA bundle download is resumable and
+# size-aware. A fixed 60 min total timeout failed every bundle (~200 MB) on
+# links below ~0.5 Mbit/s and threw the partial download away; the update to a
+# new OS version on a slow device therefore never finished.
+#   - the download goes to <bundle>.part and SURVIVES a failed attempt or a
+#     failed update call; the next attempt resumes with HTTP Range + If-Range
+#   - an attempt is aborted only on a STALL (no data for OTA_STALL_TIMEOUT);
+#     the total budget grows with the size like the image pull limit (SV-1)
+#   - attempts are retried with backoff inside one update call
+#   - the bundle is checked against the store's <url>.sha256 sidecar when the
+#     store has one; without one RAUC's signature check is the only gate
+#     (announced at WARNING)
+OTA_STALL_TIMEOUT: Final = 300  # seconds without data before an attempt is aborted
+OTA_TOTAL_TIMEOUT: Final = 3600  # minimum total budget for one update call
+OTA_MIN_RATE: Final = 16 * 1024  # bytes/s the budget assumes at worst
+OTA_TOTAL_TIMEOUT_MAX: Final = 24 * 3600  # hard cap whatever the size
+OTA_MAX_ATTEMPTS: Final = 8
+OTA_BACKOFF: Final = 30  # first pause between attempts, doubled each time
+OTA_BACKOFF_MAX: Final = 900
+# When a connection drops, aiohttp raises before handing out what its read-ahead
+# buffer still holds; those bytes are fetched again on resume (measured: about
+# 200 KB per cut, bounded by aiohttp's buffer, not by this read size).
+OTA_CHUNK: Final = 64 * 1024
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def ota_total_budget(size: int | None) -> float:
+    """Return the total time budget in seconds for an OTA bundle of size bytes."""
+    by_size = size / OTA_MIN_RATE if size else 0
+    return min(max(OTA_TOTAL_TIMEOUT, by_size), OTA_TOTAL_TIMEOUT_MAX)
+
+
+class _OtaRetry(Exception):
+    """A transient failure of one download attempt (retried)."""
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def _unlink(*paths: Path) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(OTA_CHUNK), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
 
 # SSH service on Home Assistant OS consuming /root/.ssh/authorized_keys
 DROPBEAR_SERVICE = "dropbear.service"
@@ -205,38 +272,173 @@ class OSManager(JobGroup):
             version=str(version), board=update_board, os_name=update_os_name
         )
 
-    async def _download_raucb(self, url: str, raucb: Path) -> None:
-        """Download rauc bundle (OTA) from URL."""
-        _LOGGER.info("Fetch OTA update from %s", url)
+    async def _fetch_ota_sha256(self, url: str) -> str | None:
+        """Return the sha256 the store publishes for url, None when it has none."""
+        name = url.rsplit("/", 1)[-1]
         try:
-            timeout = aiohttp.ClientTimeout(total=60 * 60, connect=180)
-            async with self.sys_websession.get(url, timeout=timeout) as request:
-                if request.status != 200:
+            timeout = aiohttp.ClientTimeout(total=120, connect=60)
+            async with self.sys_websession.get(f"{url}.sha256", timeout=timeout) as req:
+                if req.status != 200:
+                    _LOGGER.warning(
+                        "No sha256 sidecar for %s (HTTP %s) - relying on the RAUC signature check only",
+                        url,
+                        req.status,
+                    )
+                    return None
+                text = (await req.text()).strip()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise _OtaRetry(f"sha256 sidecar: {err!s}") from err
+        parts = text.split()
+        if (
+            len(parts) < 2
+            or not _SHA_RE.match(parts[0].lower())
+            or parts[1].lstrip("*").rsplit("/", 1)[-1] != name
+        ):
+            raise HassOSUpdateError(
+                f"Malformed sha256 sidecar for {url}", _LOGGER.error
+            )
+        return parts[0].lower()
+
+    async def _fetch_ota_attempt(
+        self, url: str, part: Path, etag_file: Path, started: float
+    ) -> None:
+        """One download attempt into part, resuming what part already holds."""
+        loop = asyncio.get_running_loop()
+        offset = await self.sys_run_in_executor(_file_size, part)
+        headers: dict[str, str] = {}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+            etag = await self.sys_run_in_executor(_read_text, etag_file)
+            if etag.startswith('"') and etag.endswith('"'):
+                headers["If-Range"] = etag
+        # No total timeout: a stall (no data for OTA_STALL_TIMEOUT) ends the
+        # attempt, the size-aware budget below ends the whole download.
+        timeout = aiohttp.ClientTimeout(
+            total=None, connect=180, sock_read=OTA_STALL_TIMEOUT
+        )
+        try:
+            async with self.sys_websession.get(
+                url, headers=headers, timeout=timeout
+            ) as request:
+                if request.status == 416 and offset:
+                    return  # nothing past the partial: it is complete
+                if request.status in (404, 410):
                     raise HassOSUpdateError(
                         f"Error raised from OTA Webserver: {request.status}",
                         _LOGGER.error,
                     )
+                if request.status not in (200, 206):
+                    raise _OtaRetry(f"HTTP {request.status}")
+                if request.status == 200:
+                    offset = 0  # the server sent the whole file (no or refused range)
+                etag = request.headers.get("ETag", "")
+                if etag.startswith('"'):
+                    await self.sys_run_in_executor(etag_file.write_text, etag)
+                total: int | None = None
+                content_range = request.headers.get("Content-Range", "")
+                if "/" in content_range:
+                    tail = content_range.rsplit("/", 1)[1]
+                    total = int(tail) if tail.isdigit() else None
+                elif request.content_length is not None:
+                    total = offset + request.content_length
+                budget = ota_total_budget(total)
 
-                # Download RAUCB file
-                ota_file = await self.sys_run_in_executor(raucb.open, "wb")
+                ota_file = await self.sys_run_in_executor(
+                    part.open, "ab" if offset else "wb"
+                )
                 try:
                     while True:
-                        chunk = await request.content.read(1_048_576)
+                        chunk = await request.content.read(OTA_CHUNK)
                         if not chunk:
                             break
                         await self.sys_run_in_executor(ota_file.write, chunk)
+                        if loop.time() - started > budget:
+                            raise HassOSUpdateError(
+                                f"OTA download of {url} exceeded the total timeout of"
+                                f" {budget:.0f}s ({total} bytes, budget assumes"
+                                f" >= {OTA_MIN_RATE} B/s)",
+                                _LOGGER.error,
+                            )
                 finally:
                     await self.sys_run_in_executor(ota_file.close)
-
-            _LOGGER.info("Completed download of OTA update file %s", raucb)
-
+                have = await self.sys_run_in_executor(_file_size, part)
+                if total is not None and have < total:
+                    raise _OtaRetry(f"connection closed at {have} of {total} bytes")
         except (aiohttp.ClientError, TimeoutError) as err:
-            # Nudge a fresh connectivity check; the probe is authoritative,
-            # this error path only hints that something may be wrong.
-            self.sys_supervisor.request_connectivity_check()
-            raise HassOSUpdateError(
-                f"Can't fetch OTA update from {url}: {err!s}", _LOGGER.error
-            ) from err
+            raise _OtaRetry(str(err) or type(err).__name__) from err
+
+    async def _download_raucb(self, url: str, raucb: Path) -> None:
+        """Download rauc bundle (OTA) from URL - resumable (GA fork, Odoo #2136)."""
+        _LOGGER.info("Fetch OTA update from %s", url)
+        part = raucb.with_name(f"{raucb.name}.part")
+        etag_file = raucb.with_name(f"{raucb.name}.part.etag")
+        sha_file = raucb.with_name(f"{raucb.name}.part.sha256")
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        def _cleanup_other_partials() -> None:
+            for old in raucb.parent.glob("hassos-*.raucb.part*"):
+                if not old.name.startswith(f"{raucb.name}.part"):
+                    old.unlink(missing_ok=True)
+
+        try:
+            await self.sys_run_in_executor(_cleanup_other_partials)
+            attempt = 0
+            pause = OTA_BACKOFF
+            expected: str | None = None
+            while True:
+                attempt += 1
+                try:
+                    expected = await self._fetch_ota_sha256(url)
+                    # A partial of another build of this version starts over.
+                    known = await self.sys_run_in_executor(_read_text, sha_file)
+                    have = await self.sys_run_in_executor(_file_size, part)
+                    if expected and have and known != expected:
+                        _LOGGER.info(
+                            "Partial OTA download belongs to another build - starting from 0"
+                        )
+                        await self.sys_run_in_executor(_unlink, part, etag_file)
+                        have = 0
+                    if expected:
+                        await self.sys_run_in_executor(sha_file.write_text, expected)
+                    if have:
+                        _LOGGER.info(
+                            "Resuming OTA download at byte %d (attempt %d)",
+                            have,
+                            attempt,
+                        )
+                    await self._fetch_ota_attempt(url, part, etag_file, started)
+                    break
+                except _OtaRetry as err:
+                    if attempt >= OTA_MAX_ATTEMPTS:
+                        self.sys_supervisor.request_connectivity_check()
+                        raise HassOSUpdateError(
+                            f"Can't fetch OTA update from {url} after {attempt}"
+                            f" attempts: {err!s}",
+                            _LOGGER.error,
+                        ) from err
+                    _LOGGER.warning(
+                        "OTA download attempt %d/%d failed: %s - retrying in %ds",
+                        attempt,
+                        OTA_MAX_ATTEMPTS,
+                        err,
+                        pause,
+                    )
+                    await asyncio.sleep(pause)
+                    pause = min(pause * 2, OTA_BACKOFF_MAX)
+
+            if expected:
+                actual = await self.sys_run_in_executor(_sha256_file, part)
+                if actual != expected:
+                    await self.sys_run_in_executor(_unlink, part, etag_file)
+                    raise HassOSUpdateError(
+                        f"OTA bundle sha256 mismatch for {url} (got {actual},"
+                        f" sidecar {expected}) - partial discarded",
+                        _LOGGER.error,
+                    )
+            await self.sys_run_in_executor(part.replace, raucb)
+            await self.sys_run_in_executor(_unlink, etag_file, sha_file)
+            _LOGGER.info("Completed download of OTA update file %s", raucb)
 
         except OSError as err:
             self.sys_resolution.check_oserror(err)
