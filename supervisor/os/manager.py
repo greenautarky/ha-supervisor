@@ -428,11 +428,11 @@ class OSManager(JobGroup):
                     pause = min(pause * 2, OTA_BACKOFF_MAX)
 
             if expected:
-                have = await self.sys_run_in_executor(_sha256_file, part)
-                if have != expected:
+                actual = await self.sys_run_in_executor(_sha256_file, part)
+                if actual != expected:
                     await self.sys_run_in_executor(_unlink, part, etag_file)
                     raise HassOSUpdateError(
-                        f"OTA bundle sha256 mismatch for {url} (got {have},"
+                        f"OTA bundle sha256 mismatch for {url} (got {actual},"
                         f" sidecar {expected}) - partial discarded",
                         _LOGGER.error,
                     )
