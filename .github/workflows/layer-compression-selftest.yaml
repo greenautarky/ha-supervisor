@@ -1,0 +1,33 @@
+---
+name: layer compression self-test
+
+# A published layer must be what its media type says. Fixtures run the LIVE
+# script offline. Canonical source: greenautarky/ga-core-armv7.
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+    paths:
+      - 'scripts/check-layer-compression.py'
+      - 'tests/layer-compression/**'
+      - '.github/workflows/build-ga-supervisor.yml'
+      - '.github/workflows/layer-compression-selftest.yaml'
+  push:
+    branches: [main, "ga/**"]
+    paths:
+      - 'scripts/check-layer-compression.py'
+      - 'tests/layer-compression/**'
+      - '.github/workflows/build-ga-supervisor.yml'
+      - '.github/workflows/layer-compression-selftest.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: layer compression (fixtures, wiring, cause, mutants)
+        run: python3 -I tests/layer-compression/run_fixtures.py
