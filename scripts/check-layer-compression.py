@@ -15,6 +15,8 @@ Exit 0 = all match, 1 = mismatch or unusable image (zero layers, unknown media
 type), 2 = could not check (network, auth). Never green on "could not look".
 Auth: anonymous, or REGISTRY_USER + REGISTRY_TOKEN.
 """
+
+# ruff: noqa: T201  (a CLI gate: its verdict is its output)
 import base64
 import json
 import os
@@ -34,17 +36,22 @@ DECLARED = {
     "application/vnd.oci.image.layer.v1.tar": "uncompressed",
     "application/vnd.docker.image.rootfs.diff.tar": "uncompressed",
 }
-INDEX = ("application/vnd.oci.image.index.v1+json",
-         "application/vnd.docker.distribution.manifest.list.v2+json")
-MANIFEST = ("application/vnd.oci.image.manifest.v1+json",
-            "application/vnd.docker.distribution.manifest.v2+json")
+INDEX = (
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+)
+MANIFEST = (
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+)
 
 
 class CannotCheck(Exception):
-    pass
+    """The registry could not be read; never a pass."""
 
 
 def sniff(head: bytes) -> str:
+    """Compression from the first bytes of a blob."""
     if head[:2] == GZIP:
         return "gzip"
     if head[:4] == ZSTD:
@@ -61,17 +68,26 @@ class Registry:
     """Read-only registry client. `repo` is host/path."""
 
     def __init__(self, repo):
+        """Read-only client for host/path."""
         self.host, _, self.path = repo.partition("/")
         self._open = urllib.request.build_opener(_NoRedirect).open
         self._token = None
 
     def _auth(self):
         if self._token is None:
-            q = urllib.parse.urlencode({"service": self.host, "scope": f"repository:{self.path}:pull"})
+            q = urllib.parse.urlencode(
+                {"service": self.host, "scope": f"repository:{self.path}:pull"}
+            )
             req = urllib.request.Request(f"https://{self.host}/token?{q}")
-            user, tok = os.environ.get("REGISTRY_USER"), os.environ.get("REGISTRY_TOKEN")
+            user, tok = (
+                os.environ.get("REGISTRY_USER"),
+                os.environ.get("REGISTRY_TOKEN"),
+            )
             if user and tok:
-                req.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{tok}".encode()).decode())
+                req.add_header(
+                    "Authorization",
+                    "Basic " + base64.b64encode(f"{user}:{tok}".encode()).decode(),
+                )
             self._token = json.load(urllib.request.urlopen(req, timeout=30))["token"]
         return "Bearer " + self._token
 
@@ -81,13 +97,20 @@ class Registry:
             try:
                 url = f"https://{self.host}/v2/{self.path}/{path}"
                 try:
-                    r = self._open(urllib.request.Request(
-                        url, headers={**headers, "Authorization": self._auth()}), timeout=30)
+                    r = self._open(
+                        urllib.request.Request(
+                            url, headers={**headers, "Authorization": self._auth()}
+                        ),
+                        timeout=30,
+                    )
                 except urllib.error.HTTPError as e:
                     if e.code not in (301, 302, 303, 307, 308):
                         raise
                     # the blob store must not get the registry's bearer token
-                    r = urllib.request.urlopen(urllib.request.Request(e.headers["Location"], headers=headers), timeout=30)
+                    r = urllib.request.urlopen(
+                        urllib.request.Request(e.headers["Location"], headers=headers),
+                        timeout=30,
+                    )
                 return r.read(limit) if limit else r.read()
             except urllib.error.HTTPError as e:
                 err = e
@@ -99,9 +122,13 @@ class Registry:
         raise CannotCheck(f"{path}: {err}")
 
     def manifest(self, ref):
-        return json.loads(self._get(f"manifests/{ref}", {"Accept": ", ".join(INDEX + MANIFEST)}))
+        """Manifest or index by tag or digest."""
+        return json.loads(
+            self._get(f"manifests/{ref}", {"Accept": ", ".join(INDEX + MANIFEST)})
+        )
 
     def head4(self, digest):
+        """First 4 bytes of a blob (Range request)."""
         return self._get(f"blobs/{digest}", {"Range": "bytes=0-3"}, limit=4)
 
 
@@ -114,7 +141,12 @@ def check_image(reg, ref):
             p = m.get("platform") or {}
             if p.get("architecture") == "unknown" and p.get("os") == "unknown":
                 continue  # build attestation, not an image
-            todo.append((f"{p.get('architecture', '?')}{p.get('variant', '')}", reg.manifest(m["digest"])))
+            todo.append(
+                (
+                    f"{p.get('architecture', '?')}{p.get('variant', '')}",
+                    reg.manifest(m["digest"]),
+                )
+            )
     else:
         todo.append(("image", top))
     if not todo:
@@ -130,18 +162,25 @@ def check_image(reg, ref):
             if digest not in seen:
                 head = reg.head4(digest)
                 if len(head) < 4:
-                    raise CannotCheck(f"{name} layer {i} {digest}: only {len(head)} bytes")
+                    raise CannotCheck(
+                        f"{name} layer {i} {digest}: only {len(head)} bytes"
+                    )
                 seen[digest] = sniff(head)
             inspected += 1
             if want is None:
-                problems.append(f"{name} layer {i} {digest[:19]}: unknown media type '{mt}'")
+                problems.append(
+                    f"{name} layer {i} {digest[:19]}: unknown media type '{mt}'"
+                )
             elif seen[digest] != want:
-                problems.append(f"{name} layer {i} {digest[:19]} ({layer.get('size')} B): "
-                                f"declared {want}, is {seen[digest]}")
+                problems.append(
+                    f"{name} layer {i} {digest[:19]} ({layer.get('size')} B): "
+                    f"declared {want}, is {seen[digest]}"
+                )
     return inspected, problems
 
 
 def main(refs, registry=Registry):
+    """Check every ref; exit code as in the module docstring."""
     if not refs:
         print(__doc__)
         return 2
