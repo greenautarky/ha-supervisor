@@ -171,6 +171,7 @@ jobs:
             pushed=$((pushed + 1))
           done
           [ "$pushed" -gt 0 ] || { echo "::error::nothing pushed"; exit 1; }
+          echo "Pushed $pushed DEV tag(s) for ${{ matrix.arch }}."
 
       # `docker push` can re-use a blob dockerd knows from another image for the
       # same diff_id and declare it tar.gzip whatever it is (GA Core 2026.10.4.4
@@ -185,7 +186,6 @@ jobs:
           mapfile -t refs < "$RUNNER_TEMP/pushed-tags"
           [ "${#refs[@]}" -gt 0 ] || { echo "::error::no pushed tag recorded"; exit 1; }
           scripts/check-layer-compression.py "${refs[@]}"
-          echo "Pushed $pushed DEV tag(s) for ${{ matrix.arch }}."
 
       - name: Fail the job if the gate found something
         if: steps.gate.outcome == 'failure'

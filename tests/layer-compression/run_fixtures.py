@@ -19,6 +19,8 @@ import pathlib
 import re
 import sys
 
+import yaml
+
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 LIVE = ROOT / "scripts" / "check-layer-compression.py"
@@ -193,6 +195,27 @@ ok(
 )
 ok("the gate checks the recorded tags, after the push", gate > rec > 0, f"{rec} {gate}")
 
+# each step's shell uses only what it defines: a line left behind from the push step
+# made the gate step fail on `pushed: unbound variable` (run 45784358034)
+steps = {
+    st.get("name"): st.get("run", "")
+    for st in yaml.safe_load(wf)["jobs"]["build"]["steps"]
+}
+gate_run = next(
+    (r for n, r in steps.items() if n and n.startswith("Layer compression")), ""
+)
+push_run = steps.get("Push DEV tags", "")
+ok(
+    "the gate step does not use the push step's variables",
+    gate_run and "$pushed" not in gate_run,
+    gate_run,
+)
+ok(
+    "the push step reports its own count",
+    'echo "Pushed $pushed DEV tag(s)' in push_run,
+    push_run[-200:],
+)
+
 # cause: no upstream Home Assistant image enters the pushing dockerd
 srcs = [wf] + [p.read_text() for p in (ROOT / "scripts").glob("*.sh")]
 # An IMAGE argument, not a value (`-e REPO=ghcr.io/...` names a repo, pulls nothing).
@@ -267,4 +290,4 @@ for name, old, new, data, tag in (
 
 ran = len(passed) + len(fails)
 print(f"{ran} checks, {len(fails)} failed")
-sys.exit(1 if fails or ran < 33 else 0)
+sys.exit(1 if fails or ran < 35 else 0)
